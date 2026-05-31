@@ -167,6 +167,20 @@ async function initDatabase() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        username TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        resource_id TEXT,
+        description TEXT NOT NULL,
+        ip_address TEXT,
+        user_agent TEXT
+      )
+    `);
+
     const usersResult = await client.query('SELECT COUNT(*) FROM users');
     if (parseInt(usersResult.rows[0].count) === 0) {
       const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
@@ -200,6 +214,36 @@ async function initDatabase() {
 
 interface AuthRequest extends Request {
   user?: JWTPayload;
+}
+
+async function logActivity(
+  req: Request & { user?: JWTPayload },
+  actionType: string,
+  resourceId: string | null,
+  description: string
+) {
+  const userId = req.user?.userId || null;
+  const username = req.user?.username || 'Système';
+  const ipAddress = (req.headers['x-forwarded-for'] as string) || req.ip || req.socket?.remoteAddress || null;
+  const userAgent = req.headers['user-agent'] || 'Inconnu';
+
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, username, action_type, resource_id, description, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [userId, username, actionType, resourceId, description, ipAddress, userAgent]
+    );
+
+    io.emit('audit:logged', {
+      timestamp: new Date(),
+      username,
+      action_type: actionType,
+      resource_id: resourceId,
+      description
+    });
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'enregistrement de l\'audit:', error);
+  }
 }
 
 function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
@@ -259,6 +303,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
     );
 
     if (result.rows.length === 0) {
+      await logActivity(req, 'LOGIN_FAILURE', null, `Tentative de connexion infructueuse : utilisateur '${username}' inexistant`);
       return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect' });
     }
 
@@ -266,6 +311,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
 
     if (!passwordMatch) {
+      await logActivity(req, 'LOGIN_FAILURE', null, `Tentative de connexion infructueuse pour '${username}' : mot de passe incorrect`);
       return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect' });
     }
 
@@ -274,6 +320,10 @@ app.post('/api/login', async (req: Request, res: Response) => {
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
+
+    const reqWithUser = req as Request & { user?: JWTPayload };
+    reqWithUser.user = { userId: user.id, username: user.username, role: user.role };
+    await logActivity(reqWithUser, 'LOGIN_SUCCESS', user.id, `Connexion réussie de l'utilisateur ${user.username} (Rôle: ${user.role})`);
 
     res.json({
       token,
@@ -326,6 +376,8 @@ app.post('/api/users', authenticateToken, requireRole('admin'), async (req: Auth
       'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, created_at',
       [username, passwordHash, userRole]
     );
+
+    await logActivity(req, 'USER_CREATE', result.rows[0].id, `A créé le compte de l'utilisateur ${username} avec le rôle ${userRole}`);
 
     broadcast('user:created', result.rows[0]);
     res.status(201).json(result.rows[0]);
@@ -381,6 +433,9 @@ app.patch('/api/users/:id', authenticateToken, requireRole('admin'), async (req:
       return res.status(404).json({ error: 'Utilisateur non trouvé' });
     }
 
+    const modDetails = `${role ? 'rôle modifié pour ' + role : ''}${password ? (role ? ' & ' : '') + 'mot de passe réinitialisé' : ''}`;
+    await logActivity(req, 'USER_UPDATE', result.rows[0].id, `A mis à jour le compte de l'utilisateur ${result.rows[0].username} (${modDetails})`);
+
     broadcast('user:updated', result.rows[0]);
     res.json(result.rows[0]);
   } catch (error) {
@@ -398,13 +453,15 @@ app.delete('/api/users/:id', authenticateToken, requireRole('admin'), async (req
     }
 
     const result = await pool.query(
-      'DELETE FROM users WHERE id = $1 RETURNING id',
+      'DELETE FROM users WHERE id = $1 RETURNING id, username',
       [id]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Utilisateur non trouvé' });
     }
+
+    await logActivity(req, 'USER_DELETE', id, `A supprimé le compte de l'utilisateur ${result.rows[0].username}`);
 
     broadcast('user:deleted', { id });
     res.json({ success: true });
@@ -419,6 +476,7 @@ app.get('/api/batches', authenticateToken, async (req: AuthRequest, res: Respons
     const result = await pool.query(
       'SELECT * FROM batches ORDER BY startDate DESC'
     );
+    await logActivity(req, 'BATCH_READ_ALL', null, `A accédé à la liste des lots`);
     res.json(result.rows);
   } catch (error) {
     console.error('Error fetching batches:', error);
@@ -444,6 +502,8 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
         JSON.stringify(batch.samples || [])
       ]
     );
+
+    await logActivity(req, 'BATCH_CREATE', result.rows[0].id, `A créé le lot ${batch.id} (Produit: ${batch.product}, Client: ${batch.client})`);
 
     broadcast('batch:created', result.rows[0]);
     res.status(201).json(result.rows[0]);
@@ -496,6 +556,9 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
       return res.status(404).json({ error: 'Lot non trouvé' });
     }
 
+    const changedFields = Object.keys(updates).filter(k => allowedFields.includes(k)).join(', ');
+    await logActivity(req, 'BATCH_UPDATE', id, `A mis à jour le lot ${id} (Champs modifiés: ${changedFields})`);
+
     broadcast('batch:updated', result.rows[0]);
     res.json(result.rows[0]);
   } catch (error) {
@@ -516,6 +579,8 @@ app.delete('/api/batches/:id', authenticateToken, requireRole('admin'), async (r
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Lot non trouvé' });
     }
+
+    await logActivity(req, 'BATCH_DELETE', id, `A supprimé le lot ${id}`);
 
     broadcast('batch:deleted', { id });
     res.json({ success: true });
@@ -612,6 +677,16 @@ app.delete('/api/deliveries/:id', authenticateToken, requireRole('admin'), async
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting delivery:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+app.get('/api/audit-logs', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 500'
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching audit logs:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });

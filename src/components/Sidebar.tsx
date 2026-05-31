@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, CalendarDays, TestTube2, Database, Truck, Settings, Activity, Users } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, TestTube2, Database, Truck, Settings, Activity, Users, Shield } from 'lucide-react';
 import { cn } from '../utils/cn';
 
 interface SidebarProps {
@@ -15,6 +15,7 @@ const navItems = [
   { id: 'data', label: 'Data Historique', icon: Database, adminOnly: false },
   { id: 'deliveries', label: 'Livraisons', icon: Truck, adminOnly: false },
   { id: 'users', label: 'Utilisateurs', icon: Users, adminOnly: true },
+  { id: 'audit', label: 'Journal d\'Audit', icon: Shield, adminOnly: true },
   { id: 'settings', label: 'Paramètres', icon: Settings, adminOnly: false },
 ];
 

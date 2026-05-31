@@ -11,6 +11,7 @@ import { DataHistoryView } from './views/DataHistoryView';
 import { DeliveriesView } from './views/DeliveriesView';
 import { SettingsView } from './views/SettingsView';
 import { UsersView } from './views/UsersView';
+import { AuditLogsView } from './views/AuditLogsView';
 import { BatchDrawer } from './components/BatchDrawer';
 import { Loader2 } from 'lucide-react';
 
@@ -36,6 +37,7 @@ function AppContent() {
     'data': 'Data Historique',
     'deliveries': 'Livraisons Clients',
     'users': 'Utilisateurs',
+    'audit': 'Journal d\'Audit',
     'settings': 'Paramètres'
   };
 
@@ -62,6 +64,7 @@ function AppContent() {
         {currentView === 'data' && <DataHistoryView onOpenBatch={setSelectedBatchId} />}
         {currentView === 'deliveries' && <DeliveriesView />}
         {currentView === 'users' && <UsersView />}
+        {currentView === 'audit' && <AuditLogsView />}
         {currentView === 'settings' && <SettingsView />}
       </main>
 
