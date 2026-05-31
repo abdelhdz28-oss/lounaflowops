@@ -679,6 +679,8 @@ app.delete('/api/deliveries/:id', authenticateToken, requireRole('admin'), async
     console.error('Error deleting delivery:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
+});
+
 app.get('/api/audit-logs', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
