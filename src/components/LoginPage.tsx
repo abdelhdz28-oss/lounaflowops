@@ -90,26 +90,6 @@ export function LoginPage() {
             </button>
           </form>
         </div>
-
-        <div className="mt-6 bg-slate-50 border border-slate-200 rounded-xl p-4">
-          <p className="text-center text-slate-600 text-sm font-medium mb-2">
-            Identifiants par défaut :
-          </p>
-          <div className="flex justify-center gap-6 text-sm">
-            <div className="text-center">
-              <span className="font-mono bg-white px-2 py-1 rounded border border-slate-300 text-slate-700">
-                admin
-              </span>
-              <p className="text-xs text-slate-500 mt-1">Nom d'utilisateur</p>
-            </div>
-            <div className="text-center">
-              <span className="font-mono bg-white px-2 py-1 rounded border border-slate-300 text-slate-700">
-                louna2026
-              </span>
-              <p className="text-xs text-slate-500 mt-1">Mot de passe</p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );
