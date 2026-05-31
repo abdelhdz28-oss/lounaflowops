@@ -10,7 +10,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Installer les dépendances
-RUN npm ci --frozen-lockfile
+RUN npm install
 
 # Copier le reste du code
 COPY . .
@@ -31,7 +31,7 @@ RUN adduser --system --uid 1001 lounaflow
 COPY package*.json ./
 
 # Installer seulement les dépendances de production
-RUN npm ci --frozen-lockfile --production
+RUN npm install --omit=dev
 
 # Copier le build frontend depuis l'étape builder
 COPY --from=builder /app/dist ./dist
