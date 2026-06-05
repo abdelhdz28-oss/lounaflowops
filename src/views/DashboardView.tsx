@@ -2,6 +2,36 @@ import React from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { Batch } from '../types';
+import { AlertTriangle } from 'lucide-react';
+
+function getSampleAlertMessage(batch: Batch): string | null {
+  if (!batch.samples) return null;
+  
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const todayStr = `${yyyy}-${mm}-${dd}`;
+  
+  const alerts: string[] = [];
+  
+  batch.samples.forEach(s => {
+    if (!s.applicable) return;
+    
+    // Condition 1: sendDate > expectedDate
+    if (s.sendDate && s.expectedDate && s.sendDate > s.expectedDate) {
+      alerts.push(`${s.type} : Envoyé le ${s.sendDate} (Dépassé, attendu le ${s.expectedDate})`);
+    }
+    // Condition 2: no sendDate (or not sent) and expectedDate is past
+    else if (!s.sendDate && s.expectedDate && s.expectedDate < todayStr) {
+      alerts.push(`${s.type} : Non envoyé (Retard, attendu le ${s.expectedDate})`);
+    }
+  });
+  
+  if (alerts.length === 0) return null;
+  return `Alerte échantillons :\n` + alerts.join('\n');
+}
+
 
 interface DashboardViewProps {
   onOpenBatch: (id: string) => void;
@@ -88,7 +118,20 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   onClick={() => onOpenBatch(b.id)}
                   className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors"
                 >
-                  <td className="py-3 px-4 font-bold text-blue-600">{b.id}</td>
+                  <td className="py-3 px-4 font-bold text-blue-600">
+                    <div className="flex items-center gap-1.5">
+                      <span>{b.id}</span>
+                      {(() => {
+                        const alertMsg = getSampleAlertMessage(b);
+                        return alertMsg ? (
+                          <AlertTriangle 
+                            className="w-4 h-4 text-red-500 animate-pulse flex-shrink-0" 
+                            title={alertMsg}
+                          />
+                        ) : null;
+                      })()}
+                    </div>
+                  </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-slate-800">{b.product}</span>

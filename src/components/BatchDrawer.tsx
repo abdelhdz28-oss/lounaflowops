@@ -64,7 +64,32 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   const flux = fluxConfig[localBatch.fluxKey];
 
   const handleChange = (field: keyof Batch, value: any) => {
-    setLocalBatch(prev => prev ? { ...prev, [field]: value } : null);
+    setLocalBatch(prev => {
+      if (!prev) return null;
+      let updated = { ...prev, [field]: value };
+      if (field === 'startDate') {
+        const startDateStr = value;
+        if (startDateStr) {
+          const startDate = new Date(startDateStr);
+          updated.samples = prev.samples.map(s => {
+            if (s.applicable) {
+              let daysToAdd = 0;
+              const typeUpper = s.type.toUpperCase();
+              if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
+              else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
+              
+              if (daysToAdd > 0) {
+                const expDate = new Date(startDate);
+                expDate.setDate(expDate.getDate() + daysToAdd);
+                return { ...s, expectedDate: expDate.toISOString().split('T')[0] };
+              }
+            }
+            return s;
+          });
+        }
+      }
+      return updated;
+    });
   };
 
   const handleProductChange = (name: string) => {
@@ -101,8 +126,9 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           newSamples.forEach(s => {
             if (s.applicable) {
               let daysToAdd = 0;
-              if (s.type.includes('Biocharge')) daysToAdd = 7;
-              else if (s.type.includes('EPC') || s.type.includes('Endotoxine')) daysToAdd = 21;
+              const typeUpper = s.type.toUpperCase();
+              if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
+              else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
               
               if (daysToAdd > 0) {
                 const expDate = new Date(startDate);
