@@ -148,7 +148,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   <td className="py-3 px-4">
                     <div className="w-24 h-1.5 bg-slate-200 rounded-full overflow-hidden">
                       <div 
-                        className="h-full bg-blue-600 rounded-full" 
+                        className={cn("h-full rounded-full", b.progress === 100 ? "bg-green-600" : "bg-blue-600")}
                         style={{ width: `${b.progress}%` }}
                       />
                     </div>
