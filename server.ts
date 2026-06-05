@@ -540,29 +540,142 @@ app.get('/api/batches', authenticateToken, async (req: AuthRequest, res: Respons
   }
 });
 
+async function recalculateBatchDates(batch: any) {
+  try {
+    const configResult = await pool.query("SELECT value FROM settings WHERE key = 'fluxConfig'");
+    const fluxConfig = configResult.rows[0]?.value || {};
+    const flux = fluxConfig[batch.fluxKey];
+    
+    if (batch.startDate) {
+      const startDate = new Date(batch.startDate);
+      if (!isNaN(startDate.getTime())) {
+        // 1. Recalculate endDate
+        if (flux) {
+          const leadTimeWeeks = (Object.values(flux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
+          const endDate = new Date(startDate);
+          endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
+          batch.endDate = endDate.toISOString().split('T')[0];
+        }
+        
+        // 2. Recalculate samples
+        if (batch.samples) {
+          const samples = typeof batch.samples === 'string' ? JSON.parse(batch.samples) : batch.samples;
+          if (Array.isArray(samples)) {
+            samples.forEach((s: any) => {
+              if (s.applicable) {
+                let daysToAdd = 0;
+                const typeUpper = s.type.toUpperCase();
+                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
+                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
+                
+                if (daysToAdd > 0) {
+                  const expDate = new Date(startDate);
+                  expDate.setDate(expDate.getDate() + daysToAdd);
+                  s.expectedDate = expDate.toISOString().split('T')[0];
+                }
+              } else {
+                s.expectedDate = '';
+              }
+            });
+            batch.samples = samples;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error in recalculateBatchDates:', err);
+  }
+}
+
+async function syncDeliveryForBatch(client: any, batch: any) {
+  try {
+    if (batch.deliveryDate) {
+      // Check if delivery exists
+      const delCheck = await client.query('SELECT id FROM deliveries WHERE batchId = $1', [batch.id]);
+      if (delCheck.rows.length > 0) {
+        // Update existing delivery
+        await client.query(
+          `UPDATE deliveries 
+           SET date = $1, client = $2, boxesSold = $3, palettes = $4 
+           WHERE batchId = $5`,
+          [batch.deliveryDate, batch.client || 'N/A', batch.boxesTarget || 0, batch.palettes || 0, batch.id]
+        );
+        // Fetch and broadcast update
+        const updatedDel = await client.query('SELECT * FROM deliveries WHERE batchId = $1', [batch.id]);
+        if (updatedDel.rows.length > 0) {
+          broadcast('delivery:updated', updatedDel.rows[0]);
+        }
+      } else {
+        // Insert new delivery
+        const deliveryId = (Date.now() + Math.floor(Math.random() * 1000)).toString();
+        const result = await client.query(
+          `INSERT INTO deliveries (id, batchId, client, date, boxesSold, palettes, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING *`,
+          [deliveryId, batch.id, batch.client || 'N/A', batch.deliveryDate, batch.boxesTarget || 0, batch.palettes || 0, 'PLANIFIÉ']
+        );
+        broadcast('delivery:created', result.rows[0]);
+      }
+    } else {
+      // Delete if exists and deliveryDate is cleared
+      const delCheck = await client.query('SELECT id FROM deliveries WHERE batchId = $1', [batch.id]);
+      if (delCheck.rows.length > 0) {
+        const result = await client.query(
+          'DELETE FROM deliveries WHERE batchId = $1 RETURNING id',
+          [batch.id]
+        );
+        broadcast('delivery:deleted', { id: result.rows[0].id });
+      }
+    }
+  } catch (err) {
+    console.error('Error in syncDeliveryForBatch:', err);
+  }
+}
+
 app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const batch = req.body;
-    const result = await pool.query(
-      `INSERT INTO batches (
-        id, fluxKey, reference, client, product, stepIndex, status,
-        progress, startDate, endDate, deliveryDate, notes, volume,
-        boxesTarget, distributed, conform, sold, palettes, samples
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-      RETURNING *`,
-      [
-        batch.id, batch.fluxKey, batch.reference, batch.client, batch.product,
-        batch.stepIndex, batch.status, batch.progress, batch.startDate, batch.endDate,
-        batch.deliveryDate, batch.notes, batch.volume, batch.boxesTarget,
-        batch.distributed, batch.conform, batch.sold, batch.palettes,
-        JSON.stringify(batch.samples || [])
-      ]
-    );
-
-    await logActivity(req, 'BATCH_CREATE', result.rows[0].id, `A créé le lot ${batch.id} (Produit: ${batch.product}, Client: ${batch.client})`);
-
-    broadcast('batch:created', result.rows[0]);
-    res.status(201).json(result.rows[0]);
+    
+    // Recalculate dates before saving
+    await recalculateBatchDates(batch);
+    
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      const result = await client.query(
+        `INSERT INTO batches (
+          id, fluxKey, reference, client, product, stepIndex, status,
+          progress, startDate, endDate, deliveryDate, notes, volume,
+          boxesTarget, distributed, conform, sold, palettes, samples
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        RETURNING *`,
+        [
+          batch.id, batch.fluxKey, batch.reference, batch.client, batch.product,
+          batch.stepIndex, batch.status, batch.progress, batch.startDate, batch.endDate,
+          batch.deliveryDate, batch.notes, batch.volume, batch.boxesTarget,
+          batch.distributed, batch.conform, batch.sold, batch.palettes,
+          JSON.stringify(batch.samples || [])
+        ]
+      );
+      
+      const newBatch = result.rows[0];
+      
+      // Sync delivery
+      await syncDeliveryForBatch(client, newBatch);
+      
+      await client.query('COMMIT');
+      
+      await logActivity(req, 'BATCH_CREATE', newBatch.id, `A créé le lot ${batch.id} (Produit: ${batch.product}, Client: ${batch.client})`);
+      
+      broadcast('batch:created', newBatch);
+      res.status(201).json(newBatch);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error('Error creating batch:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -580,46 +693,73 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
       'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples'
     ];
 
-    const fields: string[] = [];
-    const values: any[] = [];
-    let paramIndex = 1;
-
-    for (const [key, value] of Object.entries(updates)) {
-      if (allowedFields.includes(key)) {
-        if (key === 'samples') {
-          fields.push(`${key} = $${paramIndex++}::jsonb`);
-          values.push(JSON.stringify(value));
-        } else {
-          fields.push(`${key} = $${paramIndex++}`);
-          values.push(value);
-        }
-      }
-    }
-
-    if (fields.length === 0) {
-      return res.status(400).json({ error: 'Aucun champ à mettre à jour' });
-    }
-
-    fields.push(`updated_at = CURRENT_TIMESTAMP`);
-    values.push(id);
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // 1. Get current batch data to merge
+      const currentRes = await client.query('SELECT * FROM batches WHERE id = $1', [id]);
+      if (currentRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Lot non trouvé' });
+      }
+      
+      const currentBatch = currentRes.rows[0];
+      const mergedBatch = { ...currentBatch, ...updates };
+
+      // Parse samples if string
+      if (typeof mergedBatch.samples === 'string') {
+        mergedBatch.samples = JSON.parse(mergedBatch.samples);
+      }
+      if (typeof updates.samples === 'string') {
+        updates.samples = JSON.parse(updates.samples);
+      }
+
+      // If dates or config changes, recalculate
+      if (updates.startDate !== undefined || updates.fluxKey !== undefined || updates.samples !== undefined) {
+        await recalculateBatchDates(mergedBatch);
+        updates.endDate = mergedBatch.endDate;
+        updates.samples = mergedBatch.samples;
+      }
+
+      // 2. Synchronize deliveries
+      if (updates.deliveryDate !== undefined || updates.client !== undefined || updates.boxesTarget !== undefined || updates.palettes !== undefined || updates.id !== undefined) {
+        await syncDeliveryForBatch(client, mergedBatch);
+      }
+
+      // 3. Build update query
+      const fields: string[] = [];
+      const values: any[] = [];
+      let paramIndex = 1;
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (allowedFields.includes(key)) {
+          if (key === 'samples') {
+            fields.push(`${key} = $${paramIndex++}::jsonb`);
+            values.push(JSON.stringify(value));
+          } else {
+            fields.push(`${key} = $${paramIndex++}`);
+            values.push(value);
+          }
+        }
+      }
+
+      if (fields.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Aucun champ à mettre à jour' });
+      }
+
+      fields.push(`updated_at = CURRENT_TIMESTAMP`);
+      values.push(id);
 
       const result = await client.query(
         `UPDATE batches SET ${fields.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
         values
       );
 
-      if (result.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Lot non trouvé' });
-      }
-
       const updatedBatch = result.rows[0];
 
-      // Si l'identifiant du lot a été modifié, mettre à jour les livraisons associées en cascade
+      // Cascade update if id changed
       if (updates.id && updates.id !== id) {
         await client.query(
           'UPDATE deliveries SET batchId = $1 WHERE batchId = $2',

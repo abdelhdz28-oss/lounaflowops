@@ -77,6 +77,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produit (Réf)</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Client</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Étape</th>
+              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Début Fab.</th>
+              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Fin Fab.</th>
+              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Livraison Souhaitée</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Statut</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Progression</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Action</th>
@@ -140,6 +143,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   </td>
                   <td className="py-3 px-4 text-slate-600">{b.client}</td>
                   <td className="py-3 px-4 text-slate-600">{step}</td>
+                  <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.startDate || '-'}</td>
+                  <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.endDate || '-'}</td>
+                  <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.deliveryDate || '-'}</td>
                   <td className="py-3 px-4">
                     <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold", statusClass)}>
                       {b.status}

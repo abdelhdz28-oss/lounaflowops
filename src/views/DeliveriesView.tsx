@@ -60,8 +60,8 @@ export function DeliveriesView() {
                 <div className="font-medium text-slate-900">{d.client}</div>
                 <div>{d.date}</div>
                 <div className="font-mono font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded w-fit">{d.batchId}</div>
-                <div>{d.boxesSold.toLocaleString()} boîtes</div>
-                <div>{d.palettes} Palette(s)</div>
+                <div>{(d.boxesSold ?? 0).toLocaleString()} boîtes</div>
+                <div>{d.palettes ?? 0} Palette(s)</div>
                 <div>
                   <span className={cn(
                     "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold",
