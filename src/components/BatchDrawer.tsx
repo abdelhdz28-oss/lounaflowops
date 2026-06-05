@@ -178,7 +178,13 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Identification & Dates</h3>
             <div className="grid grid-cols-2 gap-4">
               <FormGroup label="Numéro de Lot">
-                <input type="text" value={localBatch.id} onChange={e => handleChange('id', e.target.value)} className="form-input" />
+                <input 
+                  type="text" 
+                  value={localBatch.id} 
+                  onChange={e => handleChange('id', e.target.value)} 
+                  disabled={!isNew}
+                  className={cn("form-input", !isNew && "bg-slate-100 cursor-not-allowed text-slate-500")}
+                />
               </FormGroup>
               <FormGroup label="Type de Produit">
                 <select value={localBatch.fluxKey} onChange={e => handleChange('fluxKey', e.target.value)} className="form-input">

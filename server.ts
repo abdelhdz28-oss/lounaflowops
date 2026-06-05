@@ -181,6 +181,40 @@ async function initDatabase() {
       )
     `);
 
+    // Migrations de schéma pour s'assurer que toutes les colonnes requises existent
+    console.log('🔄 Exécution des migrations de schéma...');
+    
+    // Table batches
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS fluxKey TEXT NOT NULL DEFAULT ''");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS reference TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS client TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS product TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS stepIndex INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'UPCOMING'");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS startDate TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS endDate TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS deliveryDate TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS notes TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS volume INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS boxesTarget INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS distributed INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS conform INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sold INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS palettes INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS samples JSONB DEFAULT '[]'::jsonb");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+
+    // Table deliveries
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS batchId TEXT NOT NULL DEFAULT ''");
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS client TEXT");
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS date TEXT");
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS boxesSold INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS palettes INTEGER DEFAULT 0");
+    await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PLANIFIÉ'");
+    
+    console.log('✅ Migrations de schéma terminées');
+
     const usersResult = await client.query('SELECT COUNT(*) FROM users');
     if (parseInt(usersResult.rows[0].count) === 0) {
       const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
@@ -318,7 +352,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role },
       JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
+      { expiresIn: JWT_EXPIRES_IN as any }
     );
 
     const reqWithUser = req as Request & { user?: JWTPayload };
