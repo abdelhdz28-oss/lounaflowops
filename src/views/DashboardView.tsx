@@ -57,7 +57,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
 
   // Sorting State
   const [sortColumn, setSortColumn] = useState<SortableColumn | null>('startDate');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
   // Extract unique values for dropdowns
   const uniqueClients = Array.from(new Set(batchList.map(b => b?.client).filter(Boolean))).sort();
