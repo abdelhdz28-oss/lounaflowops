@@ -57,9 +57,30 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
               const flux = fluxConfig[b.fluxKey];
               const step = flux?.steps[b.stepIndex] || '-';
               
-              let statusClass = 'bg-green-100 text-green-800';
-              if (b.status === 'AT_RISK') statusClass = 'bg-red-100 text-red-800';
-              if (b.status === 'UPCOMING') statusClass = 'bg-orange-100 text-orange-800';
+              const getStatusClass = (status: string) => {
+                const s = status.toUpperCase().replace(/\s+/g, '_');
+                if (s.includes('UPCOMING') || s.includes('AVENIR') || s.includes('À_VENIR')) {
+                  return 'bg-orange-100 text-orange-800 border border-orange-200';
+                }
+                if (s.includes('ON_TRACK') || s.includes('TRACK')) {
+                  return 'bg-green-100 text-green-800 border border-green-200';
+                }
+                if (s.includes('AT_RISK') || s.includes('RISK') || s.includes('DANGER')) {
+                  return 'bg-red-100 text-red-800 border border-red-200';
+                }
+                if (s.includes('LIBEREE') || s.includes('LIBÉRÉE')) {
+                  return 'bg-blue-100 text-blue-800 border border-blue-200'; // Bleu proposé pour Libérée
+                }
+                if (s.includes('ENLEVE') || s.includes('ENLEVÉE') || s.includes('ARCHIVED') || s.includes('SUPPRIMÉ') || s.includes('RETIRÉ')) {
+                  return 'bg-slate-100 text-slate-800 border border-slate-200'; // Gris proposé pour Enlevée
+                }
+                // Fallbacks
+                if (s.includes('COMPLETED') || s.includes('TERMINÉ') || s.includes('TERMINE')) {
+                  return 'bg-blue-100 text-blue-800 border border-blue-200';
+                }
+                return 'bg-slate-100 text-slate-700 border border-slate-200';
+              };
+              const statusClass = getStatusClass(b.status);
 
               return (
                 <tr 
