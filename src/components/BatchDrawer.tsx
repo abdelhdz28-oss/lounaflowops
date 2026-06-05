@@ -115,29 +115,44 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   };
 
   const handleSave = async () => {
-    if (isNew) {
-      if (localBatch.id.startsWith('NEW')) {
-        alert("Veuillez renommer le lot avant de sauvegarder.");
-        return;
+    try {
+      const stepsLength = flux?.steps?.length || 1;
+      const progress = Math.round(((localBatch.stepIndex + 1) / stepsLength) * 100);
+
+      if (isNew) {
+        if (localBatch.id.startsWith('NEW')) {
+          alert("Veuillez renommer le lot avant de sauvegarder.");
+          return;
+        }
+        
+        const success = await createBatch({ ...localBatch, progress });
+        if (!success) {
+          alert("Erreur lors de la création du lot. Veuillez vérifier si l'identifiant de lot n'existe pas déjà ou si vos droits d'accès sont suffisants.");
+          return;
+        }
+        
+        if (localBatch.deliveryDate) {
+          await createDelivery({
+            batchId: localBatch.id,
+            client: localBatch.client || 'N/A',
+            date: localBatch.deliveryDate,
+            boxesSold: localBatch.boxesTarget || 0,
+            palettes: localBatch.palettes || 0,
+            status: 'PLANIFIÉ'
+          });
+        }
+      } else {
+        const success = await updateBatch(localBatch.id, { ...localBatch, progress });
+        if (!success) {
+          alert("Erreur lors de la modification du lot. Veuillez vérifier vos droits d'accès.");
+          return;
+        }
       }
-      const progress = Math.round(((localBatch.stepIndex + 1) / flux.steps.length) * 100);
-      await createBatch({ ...localBatch, progress });
-      
-      if (localBatch.deliveryDate) {
-        await createDelivery({
-          batchId: localBatch.id,
-          client: localBatch.client || 'N/A',
-          date: localBatch.deliveryDate,
-          boxesSold: localBatch.boxesTarget || 0,
-          palettes: localBatch.palettes || 0,
-          status: 'PLANIFIÉ'
-        });
-      }
-    } else {
-      const progress = Math.round(((localBatch.stepIndex + 1) / flux.steps.length) * 100);
-      await updateBatch(localBatch.id, { ...localBatch, progress });
+      onClose();
+    } catch (err) {
+      console.error(err);
+      alert("Une erreur inattendue est survenue lors de l'enregistrement.");
     }
-    onClose();
   };
 
   return (

@@ -12,11 +12,11 @@ interface AppState {
   catalog: Product[];
   loading: boolean;
   refreshData: () => Promise<void>;
-  updateBatch: (id: string, data: Partial<Batch>) => Promise<void>;
-  createBatch: (data: Batch) => Promise<void>;
+  updateBatch: (id: string, data: Partial<Batch>) => Promise<boolean>;
+  createBatch: (data: Batch) => Promise<boolean>;
   deleteBatch: (id: string) => Promise<boolean>;
-  createDelivery: (data: Omit<Delivery, 'id'>) => Promise<void>;
-  updateDelivery: (id: string, data: Partial<Delivery>) => Promise<void>;
+  createDelivery: (data: Omit<Delivery, 'id'>) => Promise<boolean>;
+  updateDelivery: (id: string, data: Partial<Delivery>) => Promise<boolean>;
   deleteDelivery: (id: string) => Promise<boolean>;
   updateSettings: (config: Record<string, FluxConfig>) => Promise<void>;
   resetData: (password: string) => Promise<boolean>;
@@ -112,25 +112,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await loadData();
   };
 
-  const updateBatch = async (id: string, data: Partial<Batch>) => {
+  const updateBatch = async (id: string, data: Partial<Batch>): Promise<boolean> => {
     try {
-      await fetchWithAuth(`/api/batches/${id}`, {
+      const response = await fetchWithAuth(`/api/batches/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(data)
       });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to update batch', error);
+      return false;
     }
   };
 
-  const createBatch = async (data: Batch) => {
+  const createBatch = async (data: Batch): Promise<boolean> => {
     try {
-      await fetchWithAuth('/api/batches', {
+      const response = await fetchWithAuth('/api/batches', {
         method: 'POST',
         body: JSON.stringify(data)
       });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to create batch', error);
+      return false;
     }
   };
 
@@ -139,32 +151,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await fetchWithAuth(`/api/batches/${id}`, {
         method: 'DELETE'
       });
-      return response.ok;
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to delete batch', error);
       return false;
     }
   };
 
-  const createDelivery = async (data: Omit<Delivery, 'id'>) => {
+  const createDelivery = async (data: Omit<Delivery, 'id'>): Promise<boolean> => {
     try {
-      await fetchWithAuth('/api/deliveries', {
+      const response = await fetchWithAuth('/api/deliveries', {
         method: 'POST',
         body: JSON.stringify(data)
       });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to create delivery', error);
+      return false;
     }
   };
 
-  const updateDelivery = async (id: string, data: Partial<Delivery>) => {
+  const updateDelivery = async (id: string, data: Partial<Delivery>): Promise<boolean> => {
     try {
-      await fetchWithAuth(`/api/deliveries/${id}`, {
+      const response = await fetchWithAuth(`/api/deliveries/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(data)
       });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to update delivery', error);
+      return false;
     }
   };
 
@@ -173,7 +201,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await fetchWithAuth(`/api/deliveries/${id}`, {
         method: 'DELETE'
       });
-      return response.ok;
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Failed to delete delivery', error);
       return false;
