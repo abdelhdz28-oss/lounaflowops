@@ -10,6 +10,8 @@ interface AppState {
   deliveries: Delivery[];
   fluxConfig: Record<string, FluxConfig>;
   catalog: Product[];
+  clients: string[];
+  statuses: string[];
   loading: boolean;
   refreshData: () => Promise<void>;
   updateBatch: (id: string, data: Partial<Batch>) => Promise<boolean>;
@@ -18,7 +20,9 @@ interface AppState {
   createDelivery: (data: Omit<Delivery, 'id'>) => Promise<boolean>;
   updateDelivery: (id: string, data: Partial<Delivery>) => Promise<boolean>;
   deleteDelivery: (id: string) => Promise<boolean>;
-  updateSettings: (config: Record<string, FluxConfig>) => Promise<void>;
+  updateSettings: (config: Record<string, FluxConfig>) => Promise<boolean>;
+  updateClients: (clients: string[]) => Promise<boolean>;
+  updateStatuses: (statuses: string[]) => Promise<boolean>;
   resetData: (password: string) => Promise<boolean>;
 }
 
@@ -30,6 +34,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [fluxConfig, setFluxConfig] = useState<Record<string, FluxConfig>>(FLUX_DEFAULTS);
   const [catalog] = useState<Product[]>(PRODUCT_CATALOG);
+  const [clients, setClients] = useState<string[]>([]);
+  const [statuses, setStatuses] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchWithAuth = useCallback((endpoint: string, options: RequestInit = {}) => {
@@ -52,10 +58,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       setLoading(true);
 
-      const [batchesRes, deliveriesRes, configRes] = await Promise.all([
+      const [batchesRes, deliveriesRes, configRes, clientsRes, statusesRes] = await Promise.all([
         fetchWithAuth('/api/batches'),
         fetchWithAuth('/api/deliveries'),
-        fetchWithAuth('/api/settings/fluxConfig')
+        fetchWithAuth('/api/settings/fluxConfig'),
+        fetchWithAuth('/api/settings/clients'),
+        fetchWithAuth('/api/settings/statuses')
       ]);
 
       if (batchesRes.ok) {
@@ -71,6 +79,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (configRes.ok) {
         const data = await configRes.json();
         setFluxConfig(data);
+      }
+
+      if (clientsRes.ok) {
+        const data = await clientsRes.json();
+        setClients(data);
+      }
+
+      if (statusesRes.ok) {
+        const data = await statusesRes.json();
+        setStatuses(data);
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -212,7 +230,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const updateSettings = async (config: Record<string, FluxConfig>) => {
+  const updateSettings = async (config: Record<string, FluxConfig>): Promise<boolean> => {
     try {
       const response = await fetchWithAuth('/api/settings/fluxConfig', {
         method: 'PUT',
@@ -220,10 +238,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
 
       if (response.ok) {
-        setFluxConfig(config);
+        await loadData();
+        return true;
       }
+      return false;
     } catch (error) {
       console.error('Failed to update settings', error);
+      return false;
+    }
+  };
+
+  const updateClients = async (newClients: string[]): Promise<boolean> => {
+    try {
+      const response = await fetchWithAuth('/api/settings/clients', {
+        method: 'PUT',
+        body: JSON.stringify(newClients)
+      });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Failed to update clients', error);
+      return false;
+    }
+  };
+
+  const updateStatuses = async (newStatuses: string[]): Promise<boolean> => {
+    try {
+      const response = await fetchWithAuth('/api/settings/statuses', {
+        method: 'PUT',
+        body: JSON.stringify(newStatuses)
+      });
+      if (response.ok) {
+        await loadData();
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Failed to update statuses', error);
+      return false;
     }
   };
 
@@ -246,10 +301,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   return (
     <AppContext.Provider value={{
-      batches, deliveries, fluxConfig, catalog, loading,
+      batches, deliveries, fluxConfig, catalog, clients, statuses, loading,
       refreshData, updateBatch, createBatch, deleteBatch,
       createDelivery, updateDelivery, deleteDelivery,
-      updateSettings, resetData
+      updateSettings, updateClients, updateStatuses, resetData
     }}>
       {children}
     </AppContext.Provider>

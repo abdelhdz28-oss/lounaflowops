@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Info, TestTube2 } from 'lucide-react';
+import { X, Info, TestTube2, Plus, Trash2 } from 'lucide-react';
 import { useAppContext } from '../AppContext';
+import { useAuth } from '../AuthContext';
 import { Batch, Sample, FluxConfig } from '../types';
 import { cn } from '../utils/cn';
 
@@ -10,7 +11,11 @@ interface BatchDrawerProps {
 }
 
 export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
-  const { batches, fluxConfig, catalog, updateBatch, createBatch, createDelivery } = useAppContext();
+  const { 
+    batches, fluxConfig, catalog, updateBatch, createBatch, createDelivery,
+    clients, updateClients, statuses, updateStatuses, updateSettings
+  } = useAppContext();
+  const { isAdmin } = useAuth();
   const [localBatch, setLocalBatch] = useState<Batch | null>(null);
   const [isNew, setIsNew] = useState(false);
 
@@ -114,6 +119,119 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     });
   };
 
+  const handleAddClient = async () => {
+    const newClient = prompt("Saisissez le nom du nouveau client :");
+    if (newClient && newClient.trim()) {
+      const trimmed = newClient.trim().toUpperCase();
+      if (clients.includes(trimmed)) {
+        alert("Ce client existe déjà !");
+        return;
+      }
+      const success = await updateClients([...clients, trimmed]);
+      if (success) {
+        handleChange('client', trimmed);
+      } else {
+        alert("Erreur lors de l'ajout du client.");
+      }
+    }
+  };
+
+  const handleAddStep = async () => {
+    const newStep = prompt("Saisissez le nom de la nouvelle étape :");
+    if (newStep && newStep.trim() && localBatch.fluxKey) {
+      const trimmed = newStep.trim();
+      const currentFlux = fluxConfig[localBatch.fluxKey];
+      if (!currentFlux) return;
+      if (currentFlux.steps.includes(trimmed)) {
+        alert("Cette étape existe déjà dans ce flux !");
+        return;
+      }
+      const updatedConfig = {
+        ...fluxConfig,
+        [localBatch.fluxKey]: {
+          ...currentFlux,
+          steps: [...currentFlux.steps, trimmed],
+          durations: {
+            ...currentFlux.durations,
+            [trimmed]: 1
+          }
+        }
+      };
+      const success = await updateSettings(updatedConfig);
+      if (success) {
+        handleChange('stepIndex', currentFlux.steps.length);
+      } else {
+        alert("Erreur lors de l'ajout de l'étape.");
+      }
+    }
+  };
+
+  const handleDeleteStep = async () => {
+    if (!localBatch.fluxKey) return;
+    const currentFlux = fluxConfig[localBatch.fluxKey];
+    if (!currentFlux) return;
+    if (currentFlux.steps.length <= 1) {
+      alert("Impossible de supprimer la seule étape restante d'un flux.");
+      return;
+    }
+    const stepToDelete = currentFlux.steps[localBatch.stepIndex];
+    if (confirm(`Voulez-vous vraiment supprimer l'étape "${stepToDelete}" de ce flux ?`)) {
+      const updatedSteps = currentFlux.steps.filter((_, idx) => idx !== localBatch.stepIndex);
+      const updatedDurations = { ...currentFlux.durations };
+      delete updatedDurations[stepToDelete];
+
+      const updatedConfig = {
+        ...fluxConfig,
+        [localBatch.fluxKey]: {
+          ...currentFlux,
+          steps: updatedSteps,
+          durations: updatedDurations
+        }
+      };
+      const success = await updateSettings(updatedConfig);
+      if (success) {
+        const newIdx = Math.max(0, localBatch.stepIndex - 1);
+        handleChange('stepIndex', newIdx);
+      } else {
+        alert("Erreur lors de la suppression de l'étape.");
+      }
+    }
+  };
+
+  const handleAddStatus = async () => {
+    const newStatus = prompt("Saisissez le nom du nouveau statut global (ex: EN_ATTENTE) :");
+    if (newStatus && newStatus.trim()) {
+      const trimmed = newStatus.trim().toUpperCase().replace(/\s+/g, '_');
+      if (statuses.includes(trimmed)) {
+        alert("Ce statut existe déjà !");
+        return;
+      }
+      const success = await updateStatuses([...statuses, trimmed]);
+      if (success) {
+        handleChange('status', trimmed);
+      } else {
+        alert("Erreur lors de l'ajout du statut.");
+      }
+    }
+  };
+
+  const handleDeleteStatus = async () => {
+    if (statuses.length <= 1) {
+      alert("Impossible de supprimer le seul statut restant.");
+      return;
+    }
+    const statusToDelete = localBatch.status;
+    if (confirm(`Voulez-vous vraiment supprimer le statut "${statusToDelete}" ?`)) {
+      const updatedStatuses = statuses.filter(s => s !== statusToDelete);
+      const success = await updateStatuses(updatedStatuses);
+      if (success) {
+        handleChange('status', updatedStatuses[0]);
+      } else {
+        alert("Erreur lors de la suppression du statut.");
+      }
+    }
+  };
+
   const handleSave = async () => {
     try {
       const stepsLength = flux?.steps?.length || 1;
@@ -193,7 +311,28 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 </select>
               </FormGroup>
               <FormGroup label="Client">
-                <input type="text" value={localBatch.client} onChange={e => handleChange('client', e.target.value)} className="form-input" />
+                <div className="flex gap-2">
+                  <select 
+                    value={localBatch.client} 
+                    onChange={e => handleChange('client', e.target.value)} 
+                    className="form-input flex-1"
+                  >
+                    <option value="">-- Sélectionner un client --</option>
+                    {Array.from(new Set([...clients, localBatch.client || ''])).filter(Boolean).map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                  {isAdmin && (
+                    <button 
+                      type="button" 
+                      onClick={handleAddClient} 
+                      className="px-3 py-2 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors flex items-center justify-center shrink-0"
+                      title="Ajouter un nouveau client"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               </FormGroup>
               <FormGroup label="Nom Produit (Auto)">
                 <input 
@@ -239,12 +378,39 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                     </select>
                   </FormGroup>
                   <FormGroup label="Statut Global">
-                    <select value={localBatch.status} onChange={e => handleChange('status', e.target.value)} className="form-input">
-                      <option value="UPCOMING">À VENIR</option>
-                      <option value="ON_TRACK">ON TRACK</option>
-                      <option value="AT_RISK">AT RISK</option>
-                      <option value="COMPLETED">TERMINÉ</option>
-                    </select>
+                    <div className="flex gap-2">
+                      <select 
+                        value={localBatch.status} 
+                        onChange={e => handleChange('status', e.target.value)} 
+                        className="form-input flex-1"
+                      >
+                        {Array.from(new Set([...statuses, localBatch.status])).filter(Boolean).map(s => (
+                          <option key={s} value={s}>
+                            {s === 'UPCOMING' ? 'À VENIR' : s === 'ON_TRACK' ? 'ON TRACK' : s === 'AT_RISK' ? 'AT RISK' : s === 'COMPLETED' ? 'TERMINÉ' : s}
+                          </option>
+                        ))}
+                      </select>
+                      {isAdmin && (
+                        <div className="flex gap-1 shrink-0">
+                          <button 
+                            type="button" 
+                            onClick={handleAddStatus} 
+                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
+                            title="Ajouter un statut"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button 
+                            type="button" 
+                            onClick={handleDeleteStatus} 
+                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
+                            title="Supprimer le statut actuel"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </FormGroup>
                 </div>
                 <div className="mt-6 p-4 border border-slate-200 rounded-lg bg-slate-50 flex gap-3 items-start">
@@ -258,19 +424,73 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
               <>
                 <div className="grid grid-cols-2 gap-4 mb-6">
                   <FormGroup label="Étape Actuelle">
-                    <select value={localBatch.stepIndex} onChange={e => handleChange('stepIndex', parseInt(e.target.value))} className="form-input">
-                      {flux?.steps.map((s, i) => (
-                        <option key={i} value={i}>{s === '-' ? '- (Nettoyage)' : s}</option>
-                      ))}
-                    </select>
+                    <div className="flex gap-2">
+                      <select 
+                        value={localBatch.stepIndex} 
+                        onChange={e => handleChange('stepIndex', parseInt(e.target.value))} 
+                        disabled={!isAdmin}
+                        className={cn("form-input flex-1", !isAdmin && "bg-slate-50 cursor-not-allowed text-slate-500")}
+                      >
+                        {flux?.steps.map((s, i) => (
+                          <option key={i} value={i}>{s === '-' ? '- (Nettoyage)' : s}</option>
+                        ))}
+                      </select>
+                      {isAdmin && (
+                        <div className="flex gap-1 shrink-0">
+                          <button 
+                            type="button" 
+                            onClick={handleAddStep} 
+                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
+                            title="Ajouter une étape à ce flux"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button 
+                            type="button" 
+                            onClick={handleDeleteStep} 
+                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
+                            title="Supprimer l'étape actuelle de ce flux"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </FormGroup>
                   <FormGroup label="Statut Global">
-                    <select value={localBatch.status} onChange={e => handleChange('status', e.target.value)} className="form-input">
-                      <option value="UPCOMING">À VENIR</option>
-                      <option value="ON_TRACK">ON TRACK</option>
-                      <option value="AT_RISK">AT RISK</option>
-                      <option value="COMPLETED">TERMINÉ</option>
-                    </select>
+                    <div className="flex gap-2">
+                      <select 
+                        value={localBatch.status} 
+                        onChange={e => handleChange('status', e.target.value)} 
+                        className="form-input flex-1"
+                      >
+                        {Array.from(new Set([...statuses, localBatch.status])).filter(Boolean).map(s => (
+                          <option key={s} value={s}>
+                            {s === 'UPCOMING' ? 'À VENIR' : s === 'ON_TRACK' ? 'ON TRACK' : s === 'AT_RISK' ? 'AT RISK' : s === 'COMPLETED' ? 'TERMINÉ' : s}
+                          </option>
+                        ))}
+                      </select>
+                      {isAdmin && (
+                        <div className="flex gap-1 shrink-0">
+                          <button 
+                            type="button" 
+                            onClick={handleAddStatus} 
+                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
+                            title="Ajouter un statut"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button 
+                            type="button" 
+                            onClick={handleDeleteStatus} 
+                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
+                            title="Supprimer le statut actuel"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </FormGroup>
                 </div>
                 <div className="relative flex justify-between mt-8 mb-4">

@@ -106,6 +106,9 @@ const FLUX_DEFAULTS = {
   }
 };
 
+const DEFAULT_CLIENTS = ['DERMACITY', 'ETERNA GLOW', 'DERMABAY', 'FARMAS UA'];
+const DEFAULT_STATUSES = ['UPCOMING', 'ON_TRACK', 'AT_RISK', 'COMPLETED'];
+
 async function initDatabase() {
   const client = await pool.connect();
   try {
@@ -215,6 +218,9 @@ async function initDatabase() {
     
     console.log('✅ Migrations de schéma terminées');
 
+    // Supprimer la contrainte check sur le statut des lots pour autoriser des statuts personnalisés
+    await client.query("ALTER TABLE batches DROP CONSTRAINT IF EXISTS batches_status_check;");
+
     const usersResult = await client.query('SELECT COUNT(*) FROM users');
     if (parseInt(usersResult.rows[0].count) === 0) {
       const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
@@ -233,6 +239,22 @@ async function initDatabase() {
       await client.query(
         "INSERT INTO settings (key, value) VALUES ('fluxConfig', $1)",
         [JSON.stringify(FLUX_DEFAULTS)]
+      );
+    }
+
+    const clientsResult = await client.query("SELECT value FROM settings WHERE key = 'clients'");
+    if (clientsResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO settings (key, value) VALUES ('clients', $1)",
+        [JSON.stringify(DEFAULT_CLIENTS)]
+      );
+    }
+
+    const statusesResult = await client.query("SELECT value FROM settings WHERE key = 'statuses'");
+    if (statusesResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO settings (key, value) VALUES ('statuses', $1)",
+        [JSON.stringify(DEFAULT_STATUSES)]
       );
     }
 
@@ -775,6 +797,60 @@ app.put('/api/settings/fluxConfig', authenticateToken, requireRole('admin'), asy
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating fluxConfig:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/settings/clients', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'clients'");
+    const clients = result.rows.length > 0 ? result.rows[0].value : DEFAULT_CLIENTS;
+    res.json(clients);
+  } catch (error) {
+    console.error('Error fetching clients:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings/clients', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const clients = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('clients', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [JSON.stringify(clients)]
+    );
+    broadcast('settings:updated', { key: 'clients', clients });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating clients:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/settings/statuses', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'statuses'");
+    const statuses = result.rows.length > 0 ? result.rows[0].value : DEFAULT_STATUSES;
+    res.json(statuses);
+  } catch (error) {
+    console.error('Error fetching statuses:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings/statuses', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const statuses = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('statuses', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [JSON.stringify(statuses)]
+    );
+    broadcast('settings:updated', { key: 'statuses', statuses });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating statuses:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
