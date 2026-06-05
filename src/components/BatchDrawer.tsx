@@ -21,12 +21,13 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
 
   useEffect(() => {
     if (batchId) {
+      const defaultFluxKey = Object.keys(fluxConfig)[0] || 'Hydragel_A1';
       if (batchId.startsWith('NEW')) {
         setIsNew(true);
         const today = new Date().toISOString().split('T')[0];
         setLocalBatch({
           id: batchId,
-          fluxKey: 'Hydragel_A1',
+          fluxKey: defaultFluxKey,
           reference: '',
           client: '',
           product: '',
@@ -52,16 +53,22 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
       } else {
         setIsNew(false);
         const b = batches.find(x => x.id === batchId);
-        if (b) setLocalBatch(JSON.parse(JSON.stringify(b)));
+        if (b) {
+          const cloned = JSON.parse(JSON.stringify(b));
+          if (!cloned.fluxKey || !fluxConfig[cloned.fluxKey]) {
+            cloned.fluxKey = defaultFluxKey;
+          }
+          setLocalBatch(cloned);
+        }
       }
     } else {
       setLocalBatch(null);
     }
-  }, [batchId, batches]);
+  }, [batchId, batches, fluxConfig]);
 
   if (!localBatch) return null;
 
-  const flux = fluxConfig[localBatch.fluxKey];
+  const flux = fluxConfig[localBatch.fluxKey] || Object.values(fluxConfig)[0];
 
   const handleChange = (field: keyof Batch, value: any) => {
     setLocalBatch(prev => {
@@ -71,21 +78,46 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         const startDateStr = value;
         if (startDateStr) {
           const startDate = new Date(startDateStr);
-          updated.samples = prev.samples.map(s => {
-            if (s.applicable) {
-              let daysToAdd = 0;
-              const typeUpper = s.type.toUpperCase();
-              if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
-              else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
-              
-              if (daysToAdd > 0) {
-                const expDate = new Date(startDate);
-                expDate.setDate(expDate.getDate() + daysToAdd);
-                return { ...s, expectedDate: expDate.toISOString().split('T')[0] };
+          if (!isNaN(startDate.getTime())) {
+            // 1. Recalculate samples expected dates
+            updated.samples = prev.samples.map(s => {
+              if (s.applicable) {
+                let daysToAdd = 0;
+                const typeUpper = s.type.toUpperCase();
+                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
+                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
+                
+                if (daysToAdd > 0) {
+                  const expDate = new Date(startDate);
+                  expDate.setDate(expDate.getDate() + daysToAdd);
+                  return { ...s, expectedDate: expDate.toISOString().split('T')[0] };
+                }
               }
+              return s;
+            });
+
+            // 2. Recalculate endDate based on lead time
+            const currentFlux = fluxConfig[prev.fluxKey] || Object.values(fluxConfig)[0];
+            if (currentFlux) {
+              const leadTimeWeeks = (Object.values(currentFlux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
+              const endDate = new Date(startDate);
+              endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
+              updated.endDate = endDate.toISOString().split('T')[0];
             }
-            return s;
-          });
+          }
+        }
+      }
+      if (field === 'fluxKey') {
+        const newFluxKey = value;
+        const currentFlux = fluxConfig[newFluxKey];
+        if (currentFlux && prev.startDate) {
+          const startDate = new Date(prev.startDate);
+          if (!isNaN(startDate.getTime())) {
+            const leadTimeWeeks = (Object.values(currentFlux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
+            const endDate = new Date(startDate);
+            endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
+            updated.endDate = endDate.toISOString().split('T')[0];
+          }
         }
       }
       return updated;
@@ -100,7 +132,21 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         let newFluxKey = prev.fluxKey;
         const foundKey = Object.keys(fluxConfig).find(k => fluxConfig[k].name.includes(product.name.split(' ')[0]));
         if (foundKey) newFluxKey = foundKey;
-        return { ...prev, product: name, reference: product.ref, fluxKey: newFluxKey };
+        
+        let updated = { ...prev, product: name, reference: product.ref, fluxKey: newFluxKey };
+        
+        // Recalculate endDate based on new fluxKey
+        const currentFlux = fluxConfig[newFluxKey];
+        if (currentFlux && prev.startDate) {
+          const startDate = new Date(prev.startDate);
+          if (!isNaN(startDate.getTime())) {
+            const leadTimeWeeks = (Object.values(currentFlux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
+            const endDate = new Date(startDate);
+            endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
+            updated.endDate = endDate.toISOString().split('T')[0];
+          }
+        }
+        return updated;
       });
     } else {
       handleChange('product', name);
@@ -123,22 +169,24 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         const startDateStr = prev.startDate;
         if (startDateStr) {
           const startDate = new Date(startDateStr);
-          newSamples.forEach(s => {
-            if (s.applicable) {
-              let daysToAdd = 0;
-              const typeUpper = s.type.toUpperCase();
-              if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
-              else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
-              
-              if (daysToAdd > 0) {
-                const expDate = new Date(startDate);
-                expDate.setDate(expDate.getDate() + daysToAdd);
-                s.expectedDate = expDate.toISOString().split('T')[0];
+          if (!isNaN(startDate.getTime())) {
+            newSamples.forEach(s => {
+              if (s.applicable) {
+                let daysToAdd = 0;
+                const typeUpper = s.type.toUpperCase();
+                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
+                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
+                
+                if (daysToAdd > 0) {
+                  const expDate = new Date(startDate);
+                  expDate.setDate(expDate.getDate() + daysToAdd);
+                  s.expectedDate = expDate.toISOString().split('T')[0];
+                }
+              } else {
+                s.expectedDate = '';
               }
-            } else {
-              s.expectedDate = '';
-            }
-          });
+            });
+          }
         }
       }
       return { ...prev, samples: newSamples };
