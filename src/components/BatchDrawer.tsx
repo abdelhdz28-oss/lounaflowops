@@ -142,7 +142,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           });
         }
       } else {
-        const success = await updateBatch(localBatch.id, { ...localBatch, progress });
+        const success = await updateBatch(batchId!, { ...localBatch, progress });
         if (!success) {
           alert("Erreur lors de la modification du lot. Veuillez vérifier vos droits d'accès.");
           return;
@@ -182,8 +182,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                   type="text" 
                   value={localBatch.id} 
                   onChange={e => handleChange('id', e.target.value)} 
-                  disabled={!isNew}
-                  className={cn("form-input", !isNew && "bg-slate-100 cursor-not-allowed text-slate-500")}
+                  className="form-input" 
                 />
               </FormGroup>
               <FormGroup label="Type de Produit">

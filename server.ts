@@ -553,7 +553,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
     const updates = req.body;
 
     const allowedFields = [
-      'fluxKey', 'reference', 'client', 'product', 'stepIndex', 'status',
+      'id', 'fluxKey', 'reference', 'client', 'product', 'stepIndex', 'status',
       'progress', 'startDate', 'endDate', 'deliveryDate', 'notes', 'volume',
       'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples'
     ];
@@ -581,20 +581,43 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
     fields.push(`updated_at = CURRENT_TIMESTAMP`);
     values.push(id);
 
-    const result = await pool.query(
-      `UPDATE batches SET ${fields.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
-      values
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Lot non trouvé' });
+      const result = await client.query(
+        `UPDATE batches SET ${fields.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+        values
+      );
+
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Lot non trouvé' });
+      }
+
+      const updatedBatch = result.rows[0];
+
+      // Si l'identifiant du lot a été modifié, mettre à jour les livraisons associées en cascade
+      if (updates.id && updates.id !== id) {
+        await client.query(
+          'UPDATE deliveries SET batchId = $1 WHERE batchId = $2',
+          [updates.id, id]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      const changedFields = Object.keys(updates).filter(k => allowedFields.includes(k)).join(', ');
+      await logActivity(req, 'BATCH_UPDATE', updatedBatch.id, `A mis à jour le lot ${id} (Champs modifiés: ${changedFields})`);
+
+      broadcast('batch:updated', updatedBatch);
+      res.json(updatedBatch);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-
-    const changedFields = Object.keys(updates).filter(k => allowedFields.includes(k)).join(', ');
-    await logActivity(req, 'BATCH_UPDATE', id, `A mis à jour le lot ${id} (Champs modifiés: ${changedFields})`);
-
-    broadcast('batch:updated', result.rows[0]);
-    res.json(result.rows[0]);
   } catch (error) {
     console.error('Error updating batch:', error);
     res.status(500).json({ error: 'Erreur serveur' });
