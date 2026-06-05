@@ -527,13 +527,51 @@ app.delete('/api/users/:id', authenticateToken, requireRole('admin'), async (req
   }
 });
 
+function mapBatchFromDb(row: any): any {
+  if (!row) return row;
+  return {
+    id: row.id,
+    fluxKey: row.fluxkey,
+    reference: row.reference,
+    client: row.client,
+    product: row.product,
+    stepIndex: row.stepindex,
+    status: row.status,
+    progress: row.progress,
+    startDate: row.startdate,
+    endDate: row.enddate,
+    deliveryDate: row.deliverydate,
+    notes: row.notes,
+    volume: row.volume,
+    boxesTarget: row.boxestarget,
+    distributed: row.distributed,
+    conform: row.conform,
+    sold: row.sold,
+    palettes: row.palettes,
+    samples: typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || [])
+  };
+}
+
+function mapDeliveryFromDb(row: any): any {
+  if (!row) return row;
+  return {
+    id: row.id,
+    batchId: row.batchid,
+    client: row.client,
+    date: row.date,
+    boxesSold: row.boxessold,
+    palettes: row.palettes,
+    status: row.status
+  };
+}
+
 app.get('/api/batches', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
       'SELECT * FROM batches ORDER BY startDate DESC'
     );
     await logActivity(req, 'BATCH_READ_ALL', null, `A accédé à la liste des lots`);
-    res.json(result.rows);
+    res.json(result.rows.map(mapBatchFromDb));
   } catch (error) {
     console.error('Error fetching batches:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -603,7 +641,7 @@ async function syncDeliveryForBatch(client: any, batch: any) {
         // Fetch and broadcast update
         const updatedDel = await client.query('SELECT * FROM deliveries WHERE batchId = $1', [batch.id]);
         if (updatedDel.rows.length > 0) {
-          broadcast('delivery:updated', updatedDel.rows[0]);
+          broadcast('delivery:updated', mapDeliveryFromDb(updatedDel.rows[0]));
         }
       } else {
         // Insert new delivery
@@ -614,7 +652,7 @@ async function syncDeliveryForBatch(client: any, batch: any) {
            RETURNING *`,
           [deliveryId, batch.id, batch.client || 'N/A', batch.deliveryDate, batch.boxesTarget || 0, batch.palettes || 0, 'PLANIFIÉ']
         );
-        broadcast('delivery:created', result.rows[0]);
+        broadcast('delivery:created', mapDeliveryFromDb(result.rows[0]));
       }
     } else {
       // Delete if exists and deliveryDate is cleared
@@ -659,7 +697,7 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
         ]
       );
       
-      const newBatch = result.rows[0];
+      const newBatch = mapBatchFromDb(result.rows[0]);
       
       // Sync delivery
       await syncDeliveryForBatch(client, newBatch);
@@ -704,7 +742,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
         return res.status(404).json({ error: 'Lot non trouvé' });
       }
       
-      const currentBatch = currentRes.rows[0];
+      const currentBatch = mapBatchFromDb(currentRes.rows[0]);
       const mergedBatch = { ...currentBatch, ...updates };
 
       // Parse samples if string
@@ -757,7 +795,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
         values
       );
 
-      const updatedBatch = result.rows[0];
+      const updatedBatch = mapBatchFromDb(result.rows[0]);
 
       // Cascade update if id changed
       if (updates.id && updates.id !== id) {
@@ -812,7 +850,7 @@ app.delete('/api/batches/:id', authenticateToken, requireRole('admin'), async (r
 app.get('/api/deliveries', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query('SELECT * FROM deliveries ORDER BY date DESC');
-    res.json(result.rows);
+    res.json(result.rows.map(mapDeliveryFromDb));
   } catch (error) {
     console.error('Error fetching deliveries:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -832,8 +870,8 @@ app.post('/api/deliveries', authenticateToken, requireRole('editor'), async (req
        delivery.boxesSold, delivery.palettes, delivery.status || 'PLANIFIÉ']
     );
 
-    broadcast('delivery:created', result.rows[0]);
-    res.status(201).json(result.rows[0]);
+    broadcast('delivery:created', mapDeliveryFromDb(result.rows[0]));
+    res.status(201).json(mapDeliveryFromDb(result.rows[0]));
   } catch (error) {
     console.error('Error creating delivery:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -871,8 +909,8 @@ app.patch('/api/deliveries/:id', authenticateToken, requireRole('editor'), async
       return res.status(404).json({ error: 'Livraison non trouvée' });
     }
 
-    broadcast('delivery:updated', result.rows[0]);
-    res.json(result.rows[0]);
+    broadcast('delivery:updated', mapDeliveryFromDb(result.rows[0]));
+    res.json(mapDeliveryFromDb(result.rows[0]));
   } catch (error) {
     console.error('Error updating delivery:', error);
     res.status(500).json({ error: 'Erreur serveur' });
