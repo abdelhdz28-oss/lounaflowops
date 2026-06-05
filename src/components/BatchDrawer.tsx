@@ -15,7 +15,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     batches, fluxConfig, catalog, updateBatch, createBatch, createDelivery,
     clients, updateClients, statuses, updateStatuses, updateSettings
   } = useAppContext();
-  const { isAdmin } = useAuth();
+  const { isAdmin, canEdit } = useAuth();
   const [localBatch, setLocalBatch] = useState<Batch | null>(null);
   const [isNew, setIsNew] = useState(false);
 
@@ -428,8 +428,8 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                       <select 
                         value={localBatch.stepIndex} 
                         onChange={e => handleChange('stepIndex', parseInt(e.target.value))} 
-                        disabled={!isAdmin}
-                        className={cn("form-input flex-1", !isAdmin && "bg-slate-50 cursor-not-allowed text-slate-500")}
+                        disabled={!canEdit}
+                        className={cn("form-input flex-1", !canEdit && "bg-slate-50 cursor-not-allowed text-slate-500")}
                       >
                         {flux?.steps.map((s, i) => (
                           <option key={i} value={i}>{s === '-' ? '- (Nettoyage)' : s}</option>
