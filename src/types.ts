@@ -1,5 +1,9 @@
 export type Step = string;
 
+export type ProcessStage = 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
+export type QualityStatus = 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
+export type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
+
 export interface FluxConfig {
   name: string;
   steps: Step[];
@@ -22,6 +26,9 @@ export interface Batch {
   product: string;
   stepIndex: number;
   status: 'UPCOMING' | 'ON_TRACK' | 'AT_RISK' | 'COMPLETED';
+  process_stage: ProcessStage;
+  quality_status: QualityStatus;
+  schedule_health: ScheduleHealth;
   progress: number;
   startDate: string;
   endDate: string;

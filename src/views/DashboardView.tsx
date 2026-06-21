@@ -2,7 +2,12 @@ import React, { useState } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { Batch } from '../types';
+import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH } from '../constants';
 import { AlertTriangle, X, ChevronUp, ChevronDown } from 'lucide-react';
+
+const PROCESS_STAGE_LABELS: Record<string, string> = Object.fromEntries(PROCESS_STAGES.map(s => [s.value, s.label]));
+const QUALITY_STATUS_MAP = Object.fromEntries(QUALITY_STATUSES.map(s => [s.value, s]));
+const SCHEDULE_HEALTH_MAP = Object.fromEntries(SCHEDULE_HEALTH.map(s => [s.value, s]));
 
 function getSampleAlertMessage(batch: Batch): string | null {
   if (!batch || !batch.samples) return null;
@@ -36,10 +41,10 @@ interface DashboardViewProps {
   onOpenBatch: (id: string) => void;
 }
 
-type SortableColumn = 'id' | 'product' | 'client' | 'step' | 'startDate' | 'endDate' | 'deliveryDate' | 'status' | 'progress';
+type SortableColumn = 'id' | 'product' | 'client' | 'step' | 'startDate' | 'endDate' | 'deliveryDate' | 'quality' | 'health' | 'progress';
 
 export function DashboardView({ onOpenBatch }: DashboardViewProps) {
-  const { batches, fluxConfig } = useAppContext();
+  const { batches } = useAppContext();
 
   // Defensive guard: Ensure batches is an array
   const batchList = Array.isArray(batches) ? batches : [];
@@ -52,7 +57,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   const [filterStart, setFilterStart] = useState('');
   const [filterEnd, setFilterEnd] = useState('');
   const [filterDelivery, setFilterDelivery] = useState('');
-  const [filterStatus, setFilterStatus] = useState('');
+  const [filterQuality, setFilterQuality] = useState('');
+  const [filterHealth, setFilterHealth] = useState('');
   const [filterProgress, setFilterProgress] = useState('');
 
   // Sorting State
@@ -61,16 +67,11 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
 
   // Extract unique values for dropdowns
   const uniqueClients = Array.from(new Set(batchList.map(b => b?.client).filter(Boolean))).sort();
-  const uniqueStatuses = Array.from(new Set(batchList.map(b => b?.status).filter(Boolean))).sort();
-  const uniqueSteps = Array.from(new Set(batchList.map(b => {
-    if (!b) return null;
-    const flux = fluxConfig[b.fluxKey];
-    return flux?.steps[b.stepIndex] || '-';
-  }).filter(Boolean))).sort();
+  const uniqueSteps = Array.from(new Set(batchList.map(b => b?.process_stage).filter(Boolean))).sort();
 
   const hasActiveFilters = !!(
-    filterId || filterProduct || filterClient || filterStep || 
-    filterStart || filterEnd || filterDelivery || filterStatus || filterProgress
+    filterId || filterProduct || filterClient || filterStep ||
+    filterStart || filterEnd || filterDelivery || filterQuality || filterHealth || filterProgress
   );
 
   const handleResetFilters = () => {
@@ -81,7 +82,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
     setFilterStart('');
     setFilterEnd('');
     setFilterDelivery('');
-    setFilterStatus('');
+    setFilterQuality('');
+    setFilterHealth('');
     setFilterProgress('');
   };
 
@@ -96,7 +98,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
 
   // KPI calculations (always based on the total set of batches)
   const activeBatches = batchList.length;
-  const riskBatches = batchList.filter(b => b && b.status === 'AT_RISK').length;
+  const riskBatches = batchList.filter(b => b && (b.schedule_health === 'AT_RISK' || b.schedule_health === 'EN_RETARD')).length;
   
   let totalRejection = 0;
   let rejectCount = 0;
@@ -121,22 +123,21 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   // Apply filters to batches
   const filteredBatches = batchList.filter(b => {
     if (!b) return false;
-    const flux = fluxConfig[b.fluxKey];
-    const step = flux?.steps[b.stepIndex] || '-';
 
     const matchesId = (b.id || '').toLowerCase().includes(filterId.toLowerCase());
-    const matchesProduct = (b.product || '').toLowerCase().includes(filterProduct.toLowerCase()) || 
+    const matchesProduct = (b.product || '').toLowerCase().includes(filterProduct.toLowerCase()) ||
                            (b.reference || '').toLowerCase().includes(filterProduct.toLowerCase());
     const matchesClient = !filterClient || b.client === filterClient;
-    const matchesStep = !filterStep || step === filterStep;
+    const matchesStep = !filterStep || b.process_stage === filterStep;
     const matchesStart = (b.startDate || '').toLowerCase().includes(filterStart.toLowerCase());
     const matchesEnd = (b.endDate || '').toLowerCase().includes(filterEnd.toLowerCase());
     const matchesDelivery = (b.deliveryDate || '').toLowerCase().includes(filterDelivery.toLowerCase());
-    const matchesStatus = !filterStatus || b.status === filterStatus;
+    const matchesQuality = !filterQuality || b.quality_status === filterQuality;
+    const matchesHealth = !filterHealth || b.schedule_health === filterHealth;
     const matchesProgress = (b.progress ?? '').toString().includes(filterProgress);
 
-    return matchesId && matchesProduct && matchesClient && matchesStep && 
-           matchesStart && matchesEnd && matchesDelivery && matchesStatus && matchesProgress;
+    return matchesId && matchesProduct && matchesClient && matchesStep &&
+           matchesStart && matchesEnd && matchesDelivery && matchesQuality && matchesHealth && matchesProgress;
   });
 
   // Sort batches
@@ -147,10 +148,14 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
     let valB: any = '';
 
     if (sortColumn === 'step') {
-      const fluxA = fluxConfig[a.fluxKey];
-      valA = fluxA?.steps[a.stepIndex] || '-';
-      const fluxB = fluxConfig[b.fluxKey];
-      valB = fluxB?.steps[b.stepIndex] || '-';
+      valA = a.process_stage || '';
+      valB = b.process_stage || '';
+    } else if (sortColumn === 'quality') {
+      valA = a.quality_status || '';
+      valB = b.quality_status || '';
+    } else if (sortColumn === 'health') {
+      valA = a.schedule_health || '';
+      valB = b.schedule_health || '';
     } else {
       valA = a[sortColumn];
       valB = b[sortColumn];
@@ -160,6 +165,16 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
       const numA = Number(valA ?? 0);
       const numB = Number(valB ?? 0);
       return sortDirection === 'asc' ? numA - numB : numB - numA;
+    }
+
+    // Date columns: ISO yyyy-mm-dd lexicographic compare, empty values always last
+    if (sortColumn === 'startDate' || sortColumn === 'endDate' || sortColumn === 'deliveryDate') {
+      const dateA = String(valA ?? '');
+      const dateB = String(valB ?? '');
+      if (!dateA && !dateB) return 0;
+      if (!dateA) return 1;
+      if (!dateB) return -1;
+      return sortDirection === 'asc' ? dateA.localeCompare(dateB) : dateB.localeCompare(dateA);
     }
 
     const strA = String(valA ?? '').toLowerCase();
@@ -218,7 +233,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 {renderHeader('Début Fab.', 'startDate', 'w-36')}
                 {renderHeader('Fin Fab.', 'endDate', 'w-36')}
                 {renderHeader('Livraison Souhaitée', 'deliveryDate', 'w-36')}
-                {renderHeader('Statut', 'status', 'w-32')}
+                {renderHeader('Statut qualité', 'quality', 'w-32')}
+                {renderHeader('OTD', 'health', 'w-28')}
                 {renderHeader('Progression', 'progress', 'w-32')}
                 <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Action</th>
               </tr>
@@ -254,14 +270,14 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   </select>
                 </th>
                 <th className="py-2 px-3">
-                  <select 
-                    value={filterStep} 
-                    onChange={e => setFilterStep(e.target.value)} 
+                  <select
+                    value={filterStep}
+                    onChange={e => setFilterStep(e.target.value)}
                     className="w-full bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                   >
                     <option value="">Tous</option>
                     {uniqueSteps.map(s => (
-                      <option key={s} value={s}>{s}</option>
+                      <option key={s} value={s}>{PROCESS_STAGE_LABELS[s] || s}</option>
                     ))}
                   </select>
                 </th>
@@ -293,21 +309,33 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   />
                 </th>
                 <th className="py-2 px-3">
-                  <select 
-                    value={filterStatus} 
-                    onChange={e => setFilterStatus(e.target.value)} 
+                  <select
+                    value={filterQuality}
+                    onChange={e => setFilterQuality(e.target.value)}
                     className="w-full bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                   >
                     <option value="">Tous</option>
-                    {uniqueStatuses.map(s => (
-                      <option key={s} value={s}>{s}</option>
+                    {QUALITY_STATUSES.map(q => (
+                      <option key={q.value} value={q.value}>{q.label}</option>
                     ))}
                   </select>
                 </th>
                 <th className="py-2 px-3">
-                  <input 
-                    type="text" 
-                    value={filterProgress} 
+                  <select
+                    value={filterHealth}
+                    onChange={e => setFilterHealth(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">Tous</option>
+                    {SCHEDULE_HEALTH.map(h => (
+                      <option key={h.value} value={h.value}>{h.label}</option>
+                    ))}
+                  </select>
+                </th>
+                <th className="py-2 px-3">
+                  <input
+                    type="text"
+                    value={filterProgress}
                     onChange={e => setFilterProgress(e.target.value)} 
                     placeholder="Filtrer..."
                     className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
@@ -329,33 +357,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
             <tbody>
               {sortedBatches.length > 0 ? (
                 sortedBatches.map((b) => {
-                  const flux = fluxConfig[b.fluxKey];
-                  const step = flux?.steps[b.stepIndex] || '-';
-                  
-                  const getStatusClass = (status: string) => {
-                    if (!status) return 'bg-slate-100 text-slate-700 border border-slate-200';
-                    const s = status.toUpperCase().replace(/\s+/g, '_');
-                    if (s.includes('UPCOMING') || s.includes('AVENIR') || s.includes('À_VENIR')) {
-                      return 'bg-orange-100 text-orange-800 border border-orange-200';
-                    }
-                    if (s.includes('ON_TRACK') || s.includes('TRACK')) {
-                      return 'bg-green-100 text-green-800 border border-green-200';
-                    }
-                    if (s.includes('AT_RISK') || s.includes('RISK') || s.includes('DANGER')) {
-                      return 'bg-red-100 text-red-800 border border-red-200';
-                    }
-                    if (s.includes('LIBEREE') || s.includes('LIBÉRÉE')) {
-                      return 'bg-blue-100 text-blue-800 border border-blue-200';
-                    }
-                    if (s.includes('ENLEVE') || s.includes('ENLEVÉE') || s.includes('ARCHIVED') || s.includes('SUPPRIMÉ') || s.includes('RETIRÉ')) {
-                      return 'bg-slate-100 text-slate-800 border border-slate-200';
-                    }
-                    if (s.includes('COMPLETED') || s.includes('TERMINÉ') || s.includes('TERMINE')) {
-                      return 'bg-blue-100 text-blue-800 border border-blue-200';
-                    }
-                    return 'bg-slate-100 text-slate-700 border border-slate-200';
-                  };
-                  const statusClass = getStatusClass(b.status);
+                  const step = PROCESS_STAGE_LABELS[b.process_stage] || b.process_stage || '-';
+                  const quality = QUALITY_STATUS_MAP[b.quality_status];
+                  const health = SCHEDULE_HEALTH_MAP[b.schedule_health];
 
                   return (
                     <tr 
@@ -389,8 +393,13 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                       <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.endDate || '-'}</td>
                       <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.deliveryDate || '-'}</td>
                       <td className="py-3 px-4">
-                        <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold", statusClass)}>
-                          {b.status || ''}
+                        <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border", quality?.color || 'bg-slate-100 text-slate-700 border-slate-200')}>
+                          {quality?.label || b.quality_status || ''}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border", health?.color || 'bg-slate-100 text-slate-500 border-slate-200')}>
+                          {health?.label || b.schedule_health || ''}
                         </span>
                       </td>
                       <td className="py-3 px-4">
@@ -415,7 +424,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 })
               ) : (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-sm text-slate-400">
+                  <td colSpan={11} className="py-8 text-center text-sm text-slate-400">
                     Aucun lot ne correspond aux filtres actuels.
                   </td>
                 </tr>

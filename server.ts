@@ -109,6 +109,56 @@ const FLUX_DEFAULTS = {
 const DEFAULT_CLIENTS = ['DERMACITY', 'ETERNA GLOW', 'DERMABAY', 'FARMAS UA'];
 const DEFAULT_STATUSES = ['UPCOMING', 'ON_TRACK', 'AT_RISK', 'COMPLETED'];
 
+// --- Refonte du suivi des lots : 3 axes orthogonaux ---
+type ProcessStage = 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
+type QualityStatus = 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
+type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
+
+const SCHEDULE_MARGIN_DAYS = 7;
+
+// Axe 3 : Santé délai. Calculée à la volée, jamais stockée ni acceptée en écriture.
+function computeScheduleHealth(
+  endDate: string | null | undefined,
+  deliveryDate: string | null | undefined,
+  process_stage: string | null | undefined
+): ScheduleHealth {
+  if (!endDate || !deliveryDate) return 'ON_TRACK';
+  const end = new Date(endDate);
+  const delivery = new Date(deliveryDate);
+  if (isNaN(end.getTime()) || isNaN(delivery.getTime())) return 'ON_TRACK';
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (end > delivery || (today > delivery && process_stage !== 'EXPEDIE')) {
+    return 'EN_RETARD';
+  }
+  const marginDays = Math.round((delivery.getTime() - end.getTime()) / (1000 * 60 * 60 * 24));
+  if (marginDays >= SCHEDULE_MARGIN_DAYS) return 'ON_TRACK';
+  return 'AT_RISK';
+}
+
+// Valide la cohérence inter-axes. Retourne un message d'erreur FR ou null si OK.
+function validateAxes(process_stage: string | undefined, quality_status: string | undefined): string | null {
+  if (quality_status === 'LIBERE' && process_stage !== 'LIBERATION' && process_stage !== 'EXPEDIE') {
+    return 'Le statut qualité « Libéré » nécessite une étape process « Libération » ou « Expédié ».';
+  }
+  if (process_stage === 'EXPEDIE' && quality_status !== 'LIBERE') {
+    return 'L\'étape process « Expédié » nécessite un statut qualité « Libéré ».';
+  }
+  return null;
+}
+
+// Dérive le process_stage depuis le label de l'étape flux (pour la migration one-shot).
+function deriveStageFromStepLabel(label: string): ProcessStage {
+  const l = (label || '').toLowerCase();
+  if (l.includes('formul') || l.includes('répart') || l.includes('repart')) return 'FORMULATION';
+  if (l.includes('mirage') || l.includes('blister')) return 'CONDI_PRIM';
+  if (l.includes('condi') || l.includes('boite') || l.includes('boîte') || l.includes('finition')) return 'CONDI_SEC';
+  if (l.includes('libération') || l.includes('liberation')) return 'LIBERATION';
+  return 'FORMULATION';
+}
+
 async function initDatabase() {
   const client = await pool.connect();
   try {
@@ -208,6 +258,10 @@ async function initDatabase() {
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS samples JSONB DEFAULT '[]'::jsonb");
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
 
+    // Refonte 3 axes : nouvelles colonnes (schedule_health n'est PAS stocké, calculé à la volée)
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS process_stage TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS quality_status TEXT");
+
     // Table deliveries
     await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS batchId TEXT NOT NULL DEFAULT ''");
     await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS client TEXT");
@@ -256,6 +310,50 @@ async function initDatabase() {
         "INSERT INTO settings (key, value) VALUES ('statuses', $1)",
         [JSON.stringify(DEFAULT_STATUSES)]
       );
+    }
+
+    // --- Migration de données one-shot (idempotente) : éclatement de `status` en 3 axes ---
+    const toMigrate = await client.query("SELECT * FROM batches WHERE process_stage IS NULL");
+    if (toMigrate.rows.length > 0) {
+      console.log(`🔄 Migration 3 axes de ${toMigrate.rows.length} lot(s)...`);
+      const fluxCfgRes = await client.query("SELECT value FROM settings WHERE key = 'fluxConfig'");
+      const fluxConfig = fluxCfgRes.rows[0]?.value || FLUX_DEFAULTS;
+
+      for (const row of toMigrate.rows) {
+        const oldStatus = row.status;
+        let process_stage: ProcessStage;
+        let quality_status: QualityStatus;
+
+        if (oldStatus === 'LIBERE' || oldStatus === 'COMPLETED') {
+          process_stage = 'LIBERATION';
+          quality_status = 'LIBERE';
+        } else if (oldStatus === 'ENLEVE') {
+          process_stage = 'EXPEDIE';
+          quality_status = 'LIBERE';
+        } else {
+          quality_status = 'EN_COURS';
+          const flux = fluxConfig[row.fluxkey];
+          const stepLabel = (flux?.steps && flux.steps[row.stepindex]) || '';
+          process_stage = deriveStageFromStepLabel(stepLabel);
+        }
+
+        await client.query(
+          'UPDATE batches SET process_stage = $1, quality_status = $2 WHERE id = $3',
+          [process_stage, quality_status, row.id]
+        );
+
+        await client.query(
+          `INSERT INTO audit_logs (username, action_type, resource_id, description)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            'Système',
+            'BATCH_MIGRATE_AXES',
+            row.id,
+            `Migration 3 axes du lot ${row.id} : ancien statut '${oldStatus}' → process_stage='${process_stage}', quality_status='${quality_status}'`
+          ]
+        );
+      }
+      console.log('✅ Migration 3 axes terminée');
     }
 
     await client.query('COMMIT');
@@ -537,6 +635,9 @@ function mapBatchFromDb(row: any): any {
     product: row.product,
     stepIndex: row.stepindex,
     status: row.status,
+    process_stage: row.process_stage,
+    quality_status: row.quality_status,
+    schedule_health: computeScheduleHealth(row.enddate, row.deliverydate, row.process_stage),
     progress: row.progress,
     startDate: row.startdate,
     endDate: row.enddate,
@@ -673,7 +774,16 @@ async function syncDeliveryForBatch(client: any, batch: any) {
 app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const batch = req.body;
-    
+
+    // schedule_health est calculé serveur : ne jamais accepter de valeur client
+    delete batch.schedule_health;
+
+    // Validation de cohérence inter-axes
+    const axesError = validateAxes(batch.process_stage, batch.quality_status);
+    if (axesError) {
+      return res.status(400).json({ error: axesError });
+    }
+
     // Recalculate dates before saving
     await recalculateBatchDates(batch);
     
@@ -684,13 +794,15 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
       const result = await client.query(
         `INSERT INTO batches (
           id, fluxKey, reference, client, product, stepIndex, status,
+          process_stage, quality_status,
           progress, startDate, endDate, deliveryDate, notes, volume,
           boxesTarget, distributed, conform, sold, palettes, samples
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         RETURNING *`,
         [
           batch.id, batch.fluxKey, batch.reference, batch.client, batch.product,
-          batch.stepIndex, batch.status, batch.progress, batch.startDate, batch.endDate,
+          batch.stepIndex, batch.status, batch.process_stage, batch.quality_status,
+          batch.progress, batch.startDate, batch.endDate,
           batch.deliveryDate, batch.notes, batch.volume, batch.boxesTarget,
           batch.distributed, batch.conform, batch.sold, batch.palettes,
           JSON.stringify(batch.samples || [])
@@ -725,8 +837,12 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
     const { id } = req.params;
     const updates = req.body;
 
+    // schedule_health est calculé serveur : ne jamais accepter de valeur client
+    delete updates.schedule_health;
+
     const allowedFields = [
       'id', 'fluxKey', 'reference', 'client', 'product', 'stepIndex', 'status',
+      'process_stage', 'quality_status',
       'progress', 'startDate', 'endDate', 'deliveryDate', 'notes', 'volume',
       'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples'
     ];
@@ -744,6 +860,13 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
       
       const currentBatch = mapBatchFromDb(currentRes.rows[0]);
       const mergedBatch = { ...currentBatch, ...updates };
+
+      // Validation de cohérence inter-axes sur les valeurs fusionnées
+      const axesError = validateAxes(mergedBatch.process_stage, mergedBatch.quality_status);
+      if (axesError) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: axesError });
+      }
 
       // Parse samples if string
       if (typeof mergedBatch.samples === 'string') {

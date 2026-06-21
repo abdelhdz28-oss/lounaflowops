@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Search } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 
@@ -8,11 +9,30 @@ interface QualityViewProps {
 
 export function QualityView({ onOpenBatch }: QualityViewProps) {
   const { batches } = useAppContext();
+  const [search, setSearch] = useState('');
+
+  const q = search.toLowerCase();
+  const filteredBatches = batches.filter(b =>
+    (b.id || '').toLowerCase().includes(q) ||
+    (b.product || '').toLowerCase().includes(q)
+  );
 
   return (
     <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
-      <h3 className="text-lg font-semibold text-slate-800 mb-6">Suivi des Échantillons & Contrôles</h3>
-      
+      <div className="flex justify-between items-center mb-6">
+        <h3 className="text-lg font-semibold text-slate-800">Suivi des Échantillons & Contrôles</h3>
+        <div className="relative w-72">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Rechercher un numéro de lot..."
+            className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+          />
+        </div>
+      </div>
+
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -25,7 +45,7 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
             </tr>
           </thead>
           <tbody>
-            {batches.map((b) => {
+            {filteredBatches.map((b) => {
               let rate = 0;
               if (b.distributed > 0) {
                 rate = ((b.distributed - b.conform) / b.distributed) * 100;

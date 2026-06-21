@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Info, TestTube2, Plus, Trash2 } from 'lucide-react';
+import { X, Info, TestTube2, Plus } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
-import { Batch, Sample, FluxConfig } from '../types';
+import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus } from '../types';
+import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH } from '../constants';
 import { cn } from '../utils/cn';
 
 interface BatchDrawerProps {
@@ -13,7 +14,7 @@ interface BatchDrawerProps {
 export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   const { 
     batches, fluxConfig, catalog, updateBatch, createBatch, createDelivery,
-    clients, updateClients, statuses, updateStatuses, updateSettings
+    clients, updateClients
   } = useAppContext();
   const { isAdmin, canEdit } = useAuth();
   const [localBatch, setLocalBatch] = useState<Batch | null>(null);
@@ -33,6 +34,9 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           product: '',
           stepIndex: 0,
           status: 'UPCOMING',
+          process_stage: 'FORMULATION',
+          quality_status: 'EN_COURS',
+          schedule_health: 'ON_TRACK',
           progress: 0,
           startDate: today,
           endDate: today,
@@ -67,8 +71,6 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   }, [batchId, batches, fluxConfig]);
 
   if (!localBatch) return null;
-
-  const flux = fluxConfig[localBatch.fluxKey] || Object.values(fluxConfig)[0];
 
   const handleChange = (field: keyof Batch, value: any) => {
     setLocalBatch(prev => {
@@ -210,106 +212,10 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     }
   };
 
-  const handleAddStep = async () => {
-    const newStep = prompt("Saisissez le nom de la nouvelle étape :");
-    if (newStep && newStep.trim() && localBatch.fluxKey) {
-      const trimmed = newStep.trim();
-      const currentFlux = fluxConfig[localBatch.fluxKey];
-      if (!currentFlux) return;
-      if (currentFlux.steps.includes(trimmed)) {
-        alert("Cette étape existe déjà dans ce flux !");
-        return;
-      }
-      const updatedConfig = {
-        ...fluxConfig,
-        [localBatch.fluxKey]: {
-          ...currentFlux,
-          steps: [...currentFlux.steps, trimmed],
-          durations: {
-            ...currentFlux.durations,
-            [trimmed]: 1
-          }
-        }
-      };
-      const success = await updateSettings(updatedConfig);
-      if (success) {
-        handleChange('stepIndex', currentFlux.steps.length);
-      } else {
-        alert("Erreur lors de l'ajout de l'étape.");
-      }
-    }
-  };
-
-  const handleDeleteStep = async () => {
-    if (!localBatch.fluxKey) return;
-    const currentFlux = fluxConfig[localBatch.fluxKey];
-    if (!currentFlux) return;
-    if (currentFlux.steps.length <= 1) {
-      alert("Impossible de supprimer la seule étape restante d'un flux.");
-      return;
-    }
-    const stepToDelete = currentFlux.steps[localBatch.stepIndex];
-    if (confirm(`Voulez-vous vraiment supprimer l'étape "${stepToDelete}" de ce flux ?`)) {
-      const updatedSteps = currentFlux.steps.filter((_, idx) => idx !== localBatch.stepIndex);
-      const updatedDurations = { ...currentFlux.durations };
-      delete updatedDurations[stepToDelete];
-
-      const updatedConfig = {
-        ...fluxConfig,
-        [localBatch.fluxKey]: {
-          ...currentFlux,
-          steps: updatedSteps,
-          durations: updatedDurations
-        }
-      };
-      const success = await updateSettings(updatedConfig);
-      if (success) {
-        const newIdx = Math.max(0, localBatch.stepIndex - 1);
-        handleChange('stepIndex', newIdx);
-      } else {
-        alert("Erreur lors de la suppression de l'étape.");
-      }
-    }
-  };
-
-  const handleAddStatus = async () => {
-    const newStatus = prompt("Saisissez le nom du nouveau statut global (ex: EN_ATTENTE) :");
-    if (newStatus && newStatus.trim()) {
-      const trimmed = newStatus.trim().toUpperCase().replace(/\s+/g, '_');
-      if (statuses.includes(trimmed)) {
-        alert("Ce statut existe déjà !");
-        return;
-      }
-      const success = await updateStatuses([...statuses, trimmed]);
-      if (success) {
-        handleChange('status', trimmed);
-      } else {
-        alert("Erreur lors de l'ajout du statut.");
-      }
-    }
-  };
-
-  const handleDeleteStatus = async () => {
-    if (statuses.length <= 1) {
-      alert("Impossible de supprimer le seul statut restant.");
-      return;
-    }
-    const statusToDelete = localBatch.status;
-    if (confirm(`Voulez-vous vraiment supprimer le statut "${statusToDelete}" ?`)) {
-      const updatedStatuses = statuses.filter(s => s !== statusToDelete);
-      const success = await updateStatuses(updatedStatuses);
-      if (success) {
-        handleChange('status', updatedStatuses[0]);
-      } else {
-        alert("Erreur lors de la suppression du statut.");
-      }
-    }
-  };
-
   const handleSave = async () => {
     try {
-      const stepsLength = flux?.steps?.length || 1;
-      const progress = Math.round(((localBatch.stepIndex + 1) / stepsLength) * 100);
+      const stageIdx = Math.max(0, PROCESS_STAGES.findIndex(s => s.value === localBatch.process_stage));
+      const progress = Math.round((stageIdx / (PROCESS_STAGES.length - 1)) * 100);
 
       if (isNew) {
         if (localBatch.id.startsWith('NEW')) {
@@ -436,159 +342,88 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             </div>
           </div>
 
-          {/* SECTION 2: FLUX VISUALISATION */}
+          {/* SECTION 2: SUIVI 3 AXES (Étape process / Statut qualité / Santé délai) */}
           <div className="mb-8">
-            {isNew ? (
-              <>
-                <div className="text-sm text-slate-500 mb-4">
-                  Veuillez définir l'état d'avancement initial pour ce nouveau lot. Une fois le lot créé, vous pourrez visualiser l'avancement visuel ici.
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <FormGroup label="Étape Actuelle">
-                    <select value={localBatch.stepIndex} onChange={e => handleChange('stepIndex', parseInt(e.target.value))} className="form-input">
-                      {flux?.steps.map((s, i) => (
-                        <option key={i} value={i}>{s === '-' ? '- (Nettoyage)' : s}</option>
-                      ))}
-                    </select>
-                  </FormGroup>
-                  <FormGroup label="Statut Global">
-                    <div className="flex gap-2">
-                      <select 
-                        value={localBatch.status} 
-                        onChange={e => handleChange('status', e.target.value)} 
-                        className="form-input flex-1"
-                      >
-                        {Array.from(new Set([...statuses, localBatch.status])).filter(Boolean).map(s => (
-                          <option key={s} value={s}>
-                            {s === 'UPCOMING' ? 'À VENIR' : s === 'ON_TRACK' ? 'ON TRACK' : s === 'AT_RISK' ? 'AT RISK' : s === 'COMPLETED' ? 'TERMINÉ' : s}
-                          </option>
-                        ))}
-                      </select>
-                      {isAdmin && (
-                        <div className="flex gap-1 shrink-0">
-                          <button 
-                            type="button" 
-                            onClick={handleAddStatus} 
-                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
-                            title="Ajouter un statut"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                          <button 
-                            type="button" 
-                            onClick={handleDeleteStatus} 
-                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
-                            title="Supprimer le statut actuel"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </FormGroup>
-                </div>
-                <div className="mt-6 p-4 border border-slate-200 rounded-lg bg-slate-50 flex gap-3 items-start">
-                  <Info className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-                  <div className="text-sm text-slate-600">
-                    Une fois le lot créé, vous pourrez visualiser l'avancement visuel ici.
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 gap-4 mb-6">
-                  <FormGroup label="Étape Actuelle">
-                    <div className="flex gap-2">
-                      <select 
-                        value={localBatch.stepIndex} 
-                        onChange={e => handleChange('stepIndex', parseInt(e.target.value))} 
-                        disabled={!canEdit}
-                        className={cn("form-input flex-1", !canEdit && "bg-slate-50 cursor-not-allowed text-slate-500")}
-                      >
-                        {flux?.steps.map((s, i) => (
-                          <option key={i} value={i}>{s === '-' ? '- (Nettoyage)' : s}</option>
-                        ))}
-                      </select>
-                      {isAdmin && (
-                        <div className="flex gap-1 shrink-0">
-                          <button 
-                            type="button" 
-                            onClick={handleAddStep} 
-                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
-                            title="Ajouter une étape à ce flux"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                          <button 
-                            type="button" 
-                            onClick={handleDeleteStep} 
-                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
-                            title="Supprimer l'étape actuelle de ce flux"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </FormGroup>
-                  <FormGroup label="Statut Global">
-                    <div className="flex gap-2">
-                      <select 
-                        value={localBatch.status} 
-                        onChange={e => handleChange('status', e.target.value)} 
-                        className="form-input flex-1"
-                      >
-                        {Array.from(new Set([...statuses, localBatch.status])).filter(Boolean).map(s => (
-                          <option key={s} value={s}>
-                            {s === 'UPCOMING' ? 'À VENIR' : s === 'ON_TRACK' ? 'ON TRACK' : s === 'AT_RISK' ? 'AT RISK' : s === 'COMPLETED' ? 'TERMINÉ' : s}
-                          </option>
-                        ))}
-                      </select>
-                      {isAdmin && (
-                        <div className="flex gap-1 shrink-0">
-                          <button 
-                            type="button" 
-                            onClick={handleAddStatus} 
-                            className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors"
-                            title="Ajouter un statut"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                          <button 
-                            type="button" 
-                            onClick={handleDeleteStatus} 
-                            className="px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-md hover:bg-red-100 transition-colors"
-                            title="Supprimer le statut actuel"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </FormGroup>
-                </div>
-                <div className="relative flex justify-between mt-8 mb-4">
-                  <div className="absolute top-3 left-0 right-0 h-0.5 bg-slate-200 z-0" />
-                  {flux?.steps.map((step, idx) => {
-                    const isCompleted = idx < localBatch.stepIndex;
-                    const isActive = idx === localBatch.stepIndex;
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Suivi du Lot</h3>
+            <div className="grid grid-cols-3 gap-4">
+              {/* Axe 1 : Étape process */}
+              <FormGroup label="Étape process">
+                <select
+                  value={localBatch.process_stage}
+                  onChange={e => handleChange('process_stage', e.target.value as ProcessStage)}
+                  disabled={!canEdit}
+                  className={cn("form-input", !canEdit && "bg-slate-50 cursor-not-allowed text-slate-500")}
+                >
+                  {PROCESS_STAGES.map(ps => {
+                    const disabled = ps.value === 'EXPEDIE' && localBatch.quality_status !== 'LIBERE';
                     return (
-                      <div key={idx} className="relative z-10 text-center flex flex-col items-center w-16">
-                        <div className={cn(
-                          "w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold transition-colors mb-2 bg-white",
-                          isCompleted ? "border-green-500 bg-green-500 text-white" : 
-                          isActive ? "border-blue-600 bg-blue-600 text-white" : 
-                          "border-slate-300 text-slate-400"
-                        )}>
-                          {idx + 1}
-                        </div>
-                        <div className="text-[10px] text-slate-500 leading-tight">{step}</div>
-                      </div>
+                      <option key={ps.value} value={ps.value} disabled={disabled}>
+                        {ps.label}{disabled ? ' (Requiert statut Libéré)' : ''}
+                      </option>
                     );
                   })}
-                </div>
-              </>
-            )}
+                </select>
+              </FormGroup>
+
+              {/* Axe 2 : Statut qualité */}
+              <FormGroup label="Statut qualité">
+                <select
+                  value={localBatch.quality_status}
+                  onChange={e => handleChange('quality_status', e.target.value as QualityStatus)}
+                  disabled={!canEdit}
+                  className={cn("form-input", !canEdit && "bg-slate-50 cursor-not-allowed text-slate-500")}
+                >
+                  {QUALITY_STATUSES.map(qs => {
+                    const disabled = qs.value === 'LIBERE'
+                      && localBatch.process_stage !== 'LIBERATION'
+                      && localBatch.process_stage !== 'EXPEDIE';
+                    return (
+                      <option key={qs.value} value={qs.value} disabled={disabled}>
+                        {qs.label}{disabled ? ' (Requiert Libération/Expédié)' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              </FormGroup>
+
+              {/* Axe 3 : OTD (calculé, lecture seule) */}
+              <FormGroup label="OTD (On-Time Delivery)">
+                {(() => {
+                  const sh = SCHEDULE_HEALTH.find(s => s.value === localBatch.schedule_health);
+                  return (
+                    <span className={cn(
+                      "inline-flex items-center justify-center px-2.5 py-2 rounded-md text-sm font-semibold border",
+                      sh?.color || 'bg-slate-100 text-slate-500 border-slate-200'
+                    )}>
+                      {sh?.label || localBatch.schedule_health || '—'}
+                    </span>
+                  );
+                })()}
+              </FormGroup>
+            </div>
+
+            {/* Barre de progression alignée sur l'Axe 1 (process_stage) */}
+            <div className="relative flex justify-between mt-8 mb-4">
+              <div className="absolute top-3 left-0 right-0 h-0.5 bg-slate-200 z-0" />
+              {PROCESS_STAGES.map((stage, idx) => {
+                const currentIdx = PROCESS_STAGES.findIndex(s => s.value === localBatch.process_stage);
+                const isCompleted = idx < currentIdx;
+                const isActive = idx === currentIdx;
+                return (
+                  <div key={stage.value} className="relative z-10 text-center flex flex-col items-center w-20">
+                    <div className={cn(
+                      "w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold transition-colors mb-2 bg-white",
+                      isCompleted ? "border-green-500 bg-green-500 text-white" :
+                      isActive ? "border-blue-600 bg-blue-600 text-white" :
+                      "border-slate-300 text-slate-400"
+                    )}>
+                      {idx + 1}
+                    </div>
+                    <div className="text-[10px] text-slate-500 leading-tight">{stage.label}</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* SECTION 3: QUALITÉ */}
