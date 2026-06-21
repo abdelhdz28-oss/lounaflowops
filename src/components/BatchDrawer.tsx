@@ -1,10 +1,40 @@
 import React, { useState, useEffect } from 'react';
-import { X, Info, TestTube2, Plus } from 'lucide-react';
+import { X, TestTube2, Plus, RotateCcw, ExternalLink, AlertTriangle } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
-import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus } from '../types';
-import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH } from '../constants';
+import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus, SampleStatus } from '../types';
+import {
+  PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH,
+  SAMPLE_TESTS, SAMPLE_STATUSES,
+  computeSampleDates, computeTestsOk, sampleDateBadgeColor, isSampleTransitionAllowed
+} from '../constants';
 import { cn } from '../utils/cn';
+
+// Étapes du mini-stepper de statut (ordonnées). CONFORME/NON_CONFORME = même rang (final).
+const SAMPLE_STEPPER: { key: SampleStatus; label: string }[] = [
+  { key: 'A_ENVOYER', label: 'À envoyer' },
+  { key: 'ENVOYE', label: 'Envoyé' },
+  { key: 'RESULTATS_RECUS', label: 'Résultats reçus' },
+  { key: 'CONFORME', label: 'Conforme / Non conforme' }
+];
+
+function sampleStepperIndex(status: SampleStatus): number {
+  if (status === 'NON_CONFORME') return 3;
+  const i = SAMPLE_STEPPER.findIndex(s => s.key === status);
+  return i < 0 ? 0 : i;
+}
+
+// Hint « prochaine action » selon l'étape courante.
+function nextActionHint(s: Sample): string {
+  switch (s.status) {
+    case 'A_ENVOYER': return "→ Saisir la date d'envoi, puis passer à « Envoyé »";
+    case 'ENVOYE': return '→ À réception, saisir la date de réception des résultats et passer à « Résultats reçus »';
+    case 'RESULTATS_RECUS': return '→ Statuer : « Conforme » ou « Non conforme »';
+    case 'NON_CONFORME': return '→ Saisir le motif ; vous pouvez relancer un prélèvement';
+    case 'CONFORME': return '✓ Test conforme';
+    default: return '';
+  }
+}
 
 interface BatchDrawerProps {
   batchId: string | null;
@@ -12,9 +42,9 @@ interface BatchDrawerProps {
 }
 
 export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
-  const { 
-    batches, fluxConfig, catalog, updateBatch, createBatch, createDelivery,
-    clients, updateClients
+  const {
+    batches, fluxConfig, sampleConfig, catalog, updateBatch, createBatch, createDelivery,
+    clients, updateClients, samplePartners
   } = useAppContext();
   const { isAdmin, canEdit } = useAuth();
   const [localBatch, setLocalBatch] = useState<Batch | null>(null);
@@ -47,12 +77,22 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           conform: 0,
           sold: 0,
           palettes: 0,
-          samples: [
-            { type: 'Intertek-Biocharge', applicable: false, sent: false, sendDate: '', expectedDate: '' },
-            { type: 'Intertek-EPC', applicable: false, sent: false, sendDate: '', expectedDate: '' },
-            { type: 'Charles Rivers-Endotoxine', applicable: false, sent: false, sendDate: '', expectedDate: '' },
-            { type: 'Interne', applicable: false, sent: false, sendDate: '', expectedDate: '' }
-          ]
+          samples: SAMPLE_TESTS.map(t => ({
+            type: t.key,
+            partner: t.defaultPartner,
+            applicable: true,
+            status: 'A_ENVOYER' as SampleStatus,
+            dateEnvoi: '',
+            dateReceptionEchantillon: '',
+            dateResultatsAttendue: '',
+            configError: false,
+            datePrelevementReel: '',
+            dateResultatsRecus: '',
+            rapportRef: '',
+            rapportUrl: '',
+            motifNonConforme: '',
+            history: []
+          }))
         });
       } else {
         setIsNew(false);
@@ -81,22 +121,11 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         if (startDateStr) {
           const startDate = new Date(startDateStr);
           if (!isNaN(startDate.getTime())) {
-            // 1. Recalculate samples expected dates
-            updated.samples = prev.samples.map(s => {
-              if (s.applicable) {
-                let daysToAdd = 0;
-                const typeUpper = s.type.toUpperCase();
-                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
-                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
-                
-                if (daysToAdd > 0) {
-                  const expDate = new Date(startDate);
-                  expDate.setDate(expDate.getDate() + daysToAdd);
-                  return { ...s, expectedDate: expDate.toISOString().split('T')[0] };
-                }
-              }
-              return s;
-            });
+            // 1. Recalculate samples calculated dates (Calcul 1 + 2)
+            const fluxForSamples = fluxConfig[prev.fluxKey];
+            updated.samples = prev.samples.map(s =>
+              computeSampleDates({ ...s }, fluxForSamples, value, sampleConfig)
+            );
 
             // 2. Recalculate endDate based on lead time
             const currentFlux = fluxConfig[prev.fluxKey] || Object.values(fluxConfig)[0];
@@ -112,6 +141,10 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
       if (field === 'fluxKey') {
         const newFluxKey = value;
         const currentFlux = fluxConfig[newFluxKey];
+        // Recompute sample calculated dates against the new flux
+        updated.samples = prev.samples.map(s =>
+          computeSampleDates({ ...s }, currentFlux, prev.startDate, sampleConfig)
+        );
         if (currentFlux && prev.startDate) {
           const startDate = new Date(prev.startDate);
           if (!isNaN(startDate.getTime())) {
@@ -136,9 +169,12 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         if (foundKey) newFluxKey = foundKey;
         
         let updated = { ...prev, product: name, reference: product.ref, fluxKey: newFluxKey };
-        
+
         // Recalculate endDate based on new fluxKey
         const currentFlux = fluxConfig[newFluxKey];
+        updated.samples = prev.samples.map(s =>
+          computeSampleDates({ ...s }, currentFlux, prev.startDate, sampleConfig)
+        );
         if (currentFlux && prev.startDate) {
           const startDate = new Date(prev.startDate);
           if (!isNaN(startDate.getTime())) {
@@ -159,38 +195,57 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     setLocalBatch(prev => {
       if (!prev) return null;
       const newSamples = [...prev.samples];
-      newSamples[index] = { ...newSamples[index], [field]: value };
-      
-      if (field === 'applicable' && !value) {
-        newSamples[index].sent = false;
-        newSamples[index].sendDate = '';
-      }
+      let s = { ...newSamples[index], [field]: value };
 
-      // Recalculate dates
-      if (field === 'applicable' || field === 'sendDate') {
-        const startDateStr = prev.startDate;
-        if (startDateStr) {
-          const startDate = new Date(startDateStr);
-          if (!isNaN(startDate.getTime())) {
-            newSamples.forEach(s => {
-              if (s.applicable) {
-                let daysToAdd = 0;
-                const typeUpper = s.type.toUpperCase();
-                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
-                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
-                
-                if (daysToAdd > 0) {
-                  const expDate = new Date(startDate);
-                  expDate.setDate(expDate.getDate() + daysToAdd);
-                  s.expectedDate = expDate.toISOString().split('T')[0];
-                }
-              } else {
-                s.expectedDate = '';
-              }
-            });
-          }
+      // Le partenaire pilote l'applicabilité : applicable = partner non vide
+      if (field === 'partner') {
+        s.applicable = !!value;
+        // Si on rend non-applicable (partner vide) : statut figé à A_ENVOYER, envoi effacé
+        if (!value) {
+          s.status = 'A_ENVOYER';
+          s.dateEnvoi = '';
         }
       }
+
+      // Recalcul Calcul 1 + Calcul 2 pour cette ligne
+      const flux = fluxConfig[prev.fluxKey];
+      s = computeSampleDates(s, flux, prev.startDate, sampleConfig);
+      newSamples[index] = s;
+      return { ...prev, samples: newSamples };
+    });
+  };
+
+  // Re-test : archive l'essai courant dans history, réinitialise la ligne (garde partner), recalcule.
+  const handleRetest = (index: number) => {
+    setLocalBatch(prev => {
+      if (!prev) return null;
+      const newSamples = [...prev.samples];
+      const cur = newSamples[index];
+      const snapshot = {
+        status: cur.status,
+        dateEnvoi: cur.dateEnvoi,
+        datePrelevementReel: cur.datePrelevementReel || '',
+        dateReceptionEchantillon: cur.dateReceptionEchantillon,
+        dateResultatsAttendue: cur.dateResultatsAttendue,
+        dateResultatsRecus: cur.dateResultatsRecus || '',
+        rapportRef: cur.rapportRef || '',
+        rapportUrl: cur.rapportUrl || '',
+        motifNonConforme: cur.motifNonConforme || '',
+        archivedAt: new Date().toISOString().split('T')[0]
+      };
+      let reset: Sample = {
+        ...cur,
+        status: 'A_ENVOYER',
+        dateEnvoi: '',
+        datePrelevementReel: '',
+        dateResultatsRecus: '',
+        rapportRef: '',
+        rapportUrl: '',
+        motifNonConforme: '',
+        history: [...(cur.history || []), snapshot]
+      };
+      reset = computeSampleDates(reset, fluxConfig[prev.fluxKey], prev.startDate, sampleConfig);
+      newSamples[index] = reset;
       return { ...prev, samples: newSamples };
     });
   };
@@ -424,42 +479,284 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 );
               })}
             </div>
+
+            {/* Avertissement non bloquant : libération avec tests labo incomplets */}
+            {localBatch.quality_status === 'LIBERE' && !computeTestsOk(localBatch.samples) && (
+              <div className="mt-2 flex items-start gap-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-md text-sm text-orange-800">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-orange-500" />
+                <span>Libération avec tests labo incomplets (tous les tests applicables ne sont pas encore « Conforme »).</span>
+              </div>
+            )}
           </div>
 
-          {/* SECTION 3: QUALITÉ */}
+          {/* SECTION 3: SUIVI ÉCHANTILLONS — cartes guidées (saisie vs calculé) */}
           <div className="mb-8">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2 border-b-2 border-slate-200 pb-2">Suivi Échantillons (Tests)</h3>
-            <div className="text-xs text-slate-500 mb-4 flex items-center gap-1.5">
-              <Info className="w-4 h-4" />
-              Les dates de réception sont calculées automatiquement (Bio: +1sem, EPC/Endo: +3sem).
+            <div className="flex items-center justify-between mb-2 border-b-2 border-slate-200 pb-2">
+              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Suivi Échantillons (Tests)</h3>
+              {(() => {
+                const ok = computeTestsOk(localBatch.samples);
+                return (
+                  <span className={cn(
+                    "inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold border",
+                    ok ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-100 text-slate-500 border-slate-200'
+                  )}>
+                    {ok ? 'Tests labo : OK' : 'Tests labo : incomplets'}
+                  </span>
+                );
+              })()}
             </div>
-            <div className="flex flex-col gap-3">
-              {localBatch.samples.map((s, idx) => (
-                <div key={idx} className="border border-slate-200 rounded-lg p-4 bg-white grid grid-cols-[2fr_1fr_1fr_1fr_1.5fr] gap-4 items-center">
-                  <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                    <TestTube2 className="w-4 h-4 text-slate-400" />
-                    {s.type}
+
+            {/* Légende couleurs (affichée une seule fois) */}
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600 mb-4">
+              <span className="font-semibold text-slate-500">Dates calculées :</span>
+              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> à venir</span>
+              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-orange-500" /> échéance ≤ 7 j</span>
+              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> en retard</span>
+            </div>
+
+            <div className="flex flex-col gap-4">
+              {localBatch.samples.map((s, idx) => {
+                const testDef = SAMPLE_TESTS.find(t => t.key === s.type);
+                const testLabel = testDef?.label || s.type;
+                const recNotDone = s.status === 'A_ENVOYER';
+                const resNotDone = !['RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'].includes(s.status);
+                const stepIdx = sampleStepperIndex(s.status);
+                const histCount = (s.history || []).length;
+
+                // Carte non applicable : grisée, badge N/A, partenaire seul
+                if (!s.applicable) {
+                  return (
+                    <div key={idx} className="border border-slate-200 rounded-lg p-4 bg-slate-50 opacity-70 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                        <TestTube2 className="w-4 h-4 text-slate-400 shrink-0" />
+                        {testLabel}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={s.partner}
+                          onChange={e => handleSampleChange(idx, 'partner', e.target.value)}
+                          title="Partenaire / Laboratoire"
+                          className="px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none"
+                        >
+                          <option value="">— Non applicable</option>
+                          {Array.from(new Set([...samplePartners, s.partner].filter(Boolean))).map(p => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                        </select>
+                        <span className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-slate-200 text-slate-500 border border-slate-300">N/A</span>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div key={idx} className="border border-slate-200 rounded-lg bg-white overflow-hidden">
+                    {/* En-tête : test + partenaire + mini-stepper */}
+                    <div className="p-4 border-b border-slate-100">
+                      <div className="flex items-center justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                          <TestTube2 className="w-4 h-4 text-blue-500 shrink-0" />
+                          {testLabel}
+                        </div>
+                        <select
+                          value={s.partner}
+                          onChange={e => handleSampleChange(idx, 'partner', e.target.value)}
+                          title="Partenaire / Laboratoire"
+                          className="px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none"
+                        >
+                          <option value="">— Non applicable</option>
+                          {Array.from(new Set([...samplePartners, s.partner].filter(Boolean))).map(p => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {/* Mini-stepper de statut */}
+                      <div className="flex items-center">
+                        {SAMPLE_STEPPER.map((st, i) => {
+                          const done = i < stepIdx;
+                          const active = i === stepIdx;
+                          const isFinalNonConf = i === 3 && s.status === 'NON_CONFORME';
+                          return (
+                            <React.Fragment key={st.key}>
+                              <div className="flex flex-col items-center text-center w-24">
+                                <div className={cn(
+                                  "w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold border-2",
+                                  isFinalNonConf ? "bg-red-500 border-red-500 text-white" :
+                                  done ? "bg-green-500 border-green-500 text-white" :
+                                  active ? "bg-blue-600 border-blue-600 text-white" :
+                                  "bg-white border-slate-300 text-slate-400"
+                                )}>{i + 1}</div>
+                                <span className="text-[9px] leading-tight text-slate-500 mt-1">
+                                  {isFinalNonConf ? 'Non conforme' : st.label}
+                                </span>
+                              </div>
+                              {i < SAMPLE_STEPPER.length - 1 && (
+                                <div className={cn("flex-1 h-0.5 -mt-4", i < stepIdx ? "bg-green-400" : "bg-slate-200")} />
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Zone À RENSEIGNER */}
+                    <div className="p-4 bg-blue-50/40">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700">À renseigner</span>
+                        <span className="text-[11px] text-blue-700 font-medium">{nextActionHint(s)}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <FieldLabel label="Statut">
+                          <select
+                            value={s.status}
+                            onChange={e => handleSampleChange(idx, 'status', e.target.value as SampleStatus)}
+                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                          >
+                            {SAMPLE_STATUSES.map(st => {
+                              const transitionOk = isSampleTransitionAllowed(s.status, st.value);
+                              const needsEnvoi = st.value === 'ENVOYE' && !s.dateEnvoi;
+                              const needsRecus = st.value === 'RESULTATS_RECUS' && !s.dateResultatsRecus;
+                              const disabled = !transitionOk || needsEnvoi || needsRecus;
+                              let suffix = '';
+                              if (!transitionOk && s.status !== st.value) suffix = ' (transition non permise)';
+                              else if (needsEnvoi) suffix = " (date d'envoi requise)";
+                              else if (needsRecus) suffix = ' (date résultats requise)';
+                              return (
+                                <option key={st.value} value={st.value} disabled={disabled}>
+                                  {st.label}{suffix}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </FieldLabel>
+
+                        <FieldLabel label="Date d'envoi">
+                          <input
+                            type="date"
+                            value={s.dateEnvoi}
+                            onChange={e => handleSampleChange(idx, 'dateEnvoi', e.target.value)}
+                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                          />
+                        </FieldLabel>
+
+                        <FieldLabel label="Date de prélèvement réelle (optionnel)">
+                          <input
+                            type="date"
+                            value={s.datePrelevementReel || ''}
+                            onChange={e => handleSampleChange(idx, 'datePrelevementReel', e.target.value)}
+                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                          />
+                        </FieldLabel>
+
+                        <FieldLabel label="Date réception des résultats">
+                          <input
+                            type="date"
+                            value={s.dateResultatsRecus || ''}
+                            onChange={e => handleSampleChange(idx, 'dateResultatsRecus', e.target.value)}
+                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                          />
+                        </FieldLabel>
+
+                        <FieldLabel label="N° de rapport labo">
+                          <input
+                            type="text"
+                            value={s.rapportRef || ''}
+                            onChange={e => handleSampleChange(idx, 'rapportRef', e.target.value)}
+                            placeholder="Réf. rapport"
+                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                          />
+                        </FieldLabel>
+
+                        <FieldLabel label="Lien certificat (URL)">
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="url"
+                              value={s.rapportUrl || ''}
+                              onChange={e => handleSampleChange(idx, 'rapportUrl', e.target.value)}
+                              placeholder="https://…"
+                              className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
+                            />
+                            {s.rapportUrl && (
+                              <a href={s.rapportUrl} target="_blank" rel="noopener noreferrer" title="Ouvrir le certificat" className="shrink-0 text-blue-600 hover:text-blue-800">
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                            )}
+                          </div>
+                        </FieldLabel>
+
+                        {s.status === 'NON_CONFORME' && (
+                          <div className="col-span-2">
+                            <FieldLabel label="Motif de non-conformité (obligatoire)">
+                              <textarea
+                                rows={2}
+                                value={s.motifNonConforme || ''}
+                                onChange={e => handleSampleChange(idx, 'motifNonConforme', e.target.value)}
+                                placeholder="Décrire le motif de non-conformité…"
+                                className="w-full px-2 py-1 text-xs border border-red-300 rounded focus:border-red-500 outline-none bg-white resize-y"
+                              />
+                            </FieldLabel>
+                          </div>
+                        )}
+                      </div>
+
+                      {s.status === 'NON_CONFORME' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRetest(idx)}
+                          className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded hover:bg-amber-100 transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          Relancer un prélèvement
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Zone CALCULÉ (auto, lecture seule) */}
+                    <div className="p-4">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-2">Calculé (auto, lecture seule)</span>
+                      {s.configError ? (
+                        <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded leading-tight block">
+                          Étape de prélèvement absente de la fiche produit — impossible de calculer les dates.
+                        </span>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          <span className={cn(
+                            "text-[11px] px-2 py-1 rounded border text-center leading-tight",
+                            sampleDateBadgeColor(s.dateReceptionEchantillon, recNotDone)
+                          )}>
+                            Réception théorique : {s.dateReceptionEchantillon || '—'}
+                          </span>
+                          <span className={cn(
+                            "text-[11px] px-2 py-1 rounded border text-center leading-tight",
+                            sampleDateBadgeColor(s.dateResultatsAttendue, resNotDone)
+                          )}>
+                            Résultats attendus : {s.dateResultatsAttendue || '—'}
+                            {s.status === 'A_ENVOYER' && s.dateResultatsAttendue ? ' (prévisionnel)' : ''}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Historique des essais précédents (re-test) */}
+                      {histCount > 0 && (
+                        <div className="mt-3 text-[11px] text-slate-500">
+                          <div className="font-semibold text-slate-600 mb-1">Essais précédents : {histCount}</div>
+                          <ul className="flex flex-col gap-0.5">
+                            {(s.history || []).map((h: any, hi: number) => (
+                              <li key={hi} className="flex items-center gap-2">
+                                <span className="text-slate-400">#{hi + 1}</span>
+                                <span>{h.archivedAt || '—'}</span>
+                                <span className="text-slate-400">·</span>
+                                <span>{SAMPLE_STATUSES.find(st => st.value === h.status)?.label || h.status}</span>
+                                {h.motifNonConforme ? <span className="text-red-600">· {h.motifNonConforme}</span> : null}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                    <input type="checkbox" checked={s.applicable} onChange={e => handleSampleChange(idx, 'applicable', e.target.checked)} className="rounded text-blue-600 focus:ring-blue-500" />
-                    Applicable
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                    <input type="checkbox" checked={s.sent} disabled={!s.applicable} onChange={e => handleSampleChange(idx, 'sent', e.target.checked)} className="rounded text-blue-600 focus:ring-blue-500 disabled:opacity-50" />
-                    Envoyé
-                  </label>
-                  <input 
-                    type="date" 
-                    value={s.sendDate} 
-                    disabled={!s.applicable} 
-                    onChange={e => handleSampleChange(idx, 'sendDate', e.target.value)}
-                    className="px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none disabled:opacity-50 disabled:bg-slate-50"
-                  />
-                  <div className="text-xs text-blue-700 bg-blue-50 px-2 py-1 rounded text-center">
-                    {s.applicable && s.expectedDate ? `Réception: ${s.expectedDate}` : 'N/A'}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -518,6 +815,15 @@ function FormGroup({ label, children }: { label: string, children: React.ReactNo
   return (
     <div className="flex flex-col gap-1.5">
       <label className="text-xs font-semibold text-slate-600">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function FieldLabel({ label, children }: { label: string, children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-[10px] font-medium text-slate-500">{label}</label>
       {children}
     </div>
   );

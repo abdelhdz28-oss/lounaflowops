@@ -113,8 +113,45 @@ const DEFAULT_STATUSES = ['UPCOMING', 'ON_TRACK', 'AT_RISK', 'COMPLETED'];
 type ProcessStage = 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
 type QualityStatus = 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
 type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
+type SampleStatus = 'A_ENVOYER' | 'ENVOYE' | 'RESULTATS_RECUS' | 'CONFORME' | 'NON_CONFORME';
 
 const SCHEDULE_MARGIN_DAYS = 7;
+
+// Configuration des tests labo (étape de prélèvement + délai d'analyse). Éditable via Réglages.
+const DEFAULT_SAMPLE_CONFIG = {
+  mapping: {
+    INTERTEK_BIO: 'FORMULATION',
+    INTERTEK_EPC: 'CONDI_PRIM',
+    CHARLES_RIVERS_ENDO: 'CONDI_PRIM'
+  } as Record<string, ProcessStage>,
+  analysisLeadDays: {
+    INTERTEK_BIO: 10,
+    INTERTEK_EPC: 21,
+    CHARLES_RIVERS_ENDO: 21
+  } as Record<string, number>,
+  businessDays: false
+};
+
+// Transitions de statut autorisées (séquence verrouillée, miroir front).
+const SAMPLE_STATUS_TRANSITIONS: Record<string, string[]> = {
+  A_ENVOYER: ['ENVOYE'],
+  ENVOYE: ['A_ENVOYER', 'RESULTATS_RECUS'],
+  RESULTATS_RECUS: ['ENVOYE', 'CONFORME', 'NON_CONFORME'],
+  CONFORME: ['RESULTATS_RECUS'],
+  NON_CONFORME: ['RESULTATS_RECUS']
+};
+
+const STATUS_AFTER_ENVOI: SampleStatus[] = ['ENVOYE', 'RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'];
+
+// Partenaires / laboratoires sélectionnables pour les tests. Éditable via Réglages.
+const DEFAULT_SAMPLE_PARTNERS = ['Intertek', 'Charles River'];
+
+// Partenaire par défaut par test (pour la migration des samples existants).
+const SAMPLE_DEFAULT_PARTNER: Record<string, string> = {
+  INTERTEK_BIO: 'Intertek',
+  INTERTEK_EPC: 'Intertek',
+  CHARLES_RIVERS_ENDO: 'Charles River'
+};
 
 // Axe 3 : Santé délai. Calculée à la volée, jamais stockée ni acceptée en écriture.
 function computeScheduleHealth(
@@ -153,10 +190,76 @@ function validateAxes(process_stage: string | undefined, quality_status: string 
 function deriveStageFromStepLabel(label: string): ProcessStage {
   const l = (label || '').toLowerCase();
   if (l.includes('formul') || l.includes('répart') || l.includes('repart')) return 'FORMULATION';
-  if (l.includes('mirage') || l.includes('blister')) return 'CONDI_PRIM';
-  if (l.includes('condi') || l.includes('boite') || l.includes('boîte') || l.includes('finition')) return 'CONDI_SEC';
+  if (l.includes('condi prim') || l.includes('cond. prim') || l.includes('primaire') || l.includes('mirage') || l.includes('blister')) return 'CONDI_PRIM';
+  if (l.includes('condi sec') || l.includes('cond. sec') || l.includes('secondaire') || l.includes('condi') || l.includes('boite') || l.includes('boîte') || l.includes('finition')) return 'CONDI_SEC';
   if (l.includes('libération') || l.includes('liberation')) return 'LIBERATION';
   return 'FORMULATION';
+}
+
+function addDaysIso(dateStr: string, days: number, businessDays = false): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  if (!businessDays) {
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  }
+  // Jours ouvrés : saute samedis/dimanches. Jours fériés non gérés.
+  let remaining = days;
+  while (remaining > 0) {
+    d.setDate(d.getDate() + 1);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) remaining--;
+  }
+  return d.toISOString().split('T')[0];
+}
+
+// Calcul 1 (date_reception_echantillon) + Calcul 2 (date_resultats_attendue) + configError.
+// Mute le sample en place.
+function computeSampleDates(sample: any, flux: any, startDate: string | undefined, sampleConfig: any) {
+  if (!sample.applicable) {
+    sample.dateReceptionEchantillon = '';
+    sample.dateResultatsAttendue = '';
+    sample.configError = false;
+    return sample;
+  }
+
+  const stage = sampleConfig.mapping?.[sample.type];
+  const businessDays = !!sampleConfig.businessDays;
+
+  // Calcul 1
+  let reception = '';
+  let configError = false;
+  if (!flux || !startDate || !stage) {
+    reception = '';
+  } else {
+    let weeks = 0;
+    let found = false;
+    for (const label of (flux.steps || [])) {
+      if (label === '-') continue;
+      weeks += flux.durations?.[label] || 0;
+      if (deriveStageFromStepLabel(label) === stage) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      configError = true;
+      reception = '';
+    } else {
+      reception = addDaysIso(startDate, weeks * 7, businessDays);
+    }
+  }
+  sample.configError = configError;
+  sample.dateReceptionEchantillon = reception;
+
+  // Calcul 2
+  const lead = sampleConfig.analysisLeadDays?.[sample.type] || 0;
+  const base = (STATUS_AFTER_ENVOI.includes(sample.status) && sample.dateEnvoi)
+    ? sample.dateEnvoi
+    : reception;
+  sample.dateResultatsAttendue = base ? addDaysIso(base, lead, businessDays) : '';
+
+  return sample;
 }
 
 async function initDatabase() {
@@ -312,6 +415,22 @@ async function initDatabase() {
       );
     }
 
+    const sampleConfigResult = await client.query("SELECT value FROM settings WHERE key = 'sampleConfig'");
+    if (sampleConfigResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO settings (key, value) VALUES ('sampleConfig', $1)",
+        [JSON.stringify(DEFAULT_SAMPLE_CONFIG)]
+      );
+    }
+
+    const samplePartnersResult = await client.query("SELECT value FROM settings WHERE key = 'samplePartners'");
+    if (samplePartnersResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO settings (key, value) VALUES ('samplePartners', $1)",
+        [JSON.stringify(DEFAULT_SAMPLE_PARTNERS)]
+      );
+    }
+
     // --- Migration de données one-shot (idempotente) : éclatement de `status` en 3 axes ---
     const toMigrate = await client.query("SELECT * FROM batches WHERE process_stage IS NULL");
     if (toMigrate.rows.length > 0) {
@@ -354,6 +473,163 @@ async function initDatabase() {
         );
       }
       console.log('✅ Migration 3 axes terminée');
+    }
+
+    // --- Migration de données one-shot (idempotente) : refonte des samples (3 tests + 2 dates) ---
+    const fluxCfgRes2 = await client.query("SELECT value FROM settings WHERE key = 'fluxConfig'");
+    const fluxConfigMig = fluxCfgRes2.rows[0]?.value || FLUX_DEFAULTS;
+    const sampleCfgRes = await client.query("SELECT value FROM settings WHERE key = 'sampleConfig'");
+    const sampleConfigMig = sampleCfgRes.rows[0]?.value || DEFAULT_SAMPLE_CONFIG;
+
+    const allBatches = await client.query("SELECT * FROM batches");
+    const KNOWN_KEYS = ['INTERTEK_BIO', 'INTERTEK_EPC', 'CHARLES_RIVERS_ENDO'];
+
+    const mapOldType = (t: string): string | null => {
+      const u = (t || '').toLowerCase();
+      if (KNOWN_KEYS.includes(t)) return t; // déjà au nouveau format
+      if (u.includes('biocharge')) return 'INTERTEK_BIO';
+      if (u.includes('epc')) return 'INTERTEK_EPC';
+      if (u.includes('endotox')) return 'CHARLES_RIVERS_ENDO';
+      return null; // 'interne' ou inconnu → hors périmètre
+    };
+
+    for (const row of allBatches.rows) {
+      const raw = typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || []);
+      if (!Array.isArray(raw)) continue;
+
+      // Idempotence : ne migrer que si au moins un sample a encore l'ancien format
+      const needsMig = raw.some((s: any) =>
+        s && (('sent' in s) || ('expectedDate' in s) || ('sendDate' in s) || !KNOWN_KEYS.includes(s.type))
+      );
+      if (!needsMig) continue;
+
+      const newSamples: any[] = [];
+      for (const s of raw) {
+        if (!s) continue;
+        const key = mapOldType(s.type);
+        if (!key) continue; // ligne retirée (hors périmètre)
+
+        let status: SampleStatus;
+        let dateEnvoi = s.dateEnvoi || s.sendDate || '';
+        if (s.sent === true && dateEnvoi) {
+          status = 'ENVOYE';
+        } else if (s.status && ['A_ENVOYER', 'ENVOYE', 'RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'].includes(s.status)) {
+          status = s.status;
+          if (STATUS_AFTER_ENVOI.includes(status) && !dateEnvoi) status = 'A_ENVOYER';
+        } else {
+          status = 'A_ENVOYER';
+        }
+
+        const applicable = s.applicable === true;
+        const ns: any = {
+          type: key,
+          partner: typeof s.partner === 'string' ? s.partner : (applicable ? (SAMPLE_DEFAULT_PARTNER[key] || '') : ''),
+          applicable,
+          status,
+          dateEnvoi,
+          dateReceptionEchantillon: '',
+          dateResultatsAttendue: '',
+          configError: false,
+          datePrelevementReel: s.datePrelevementReel || '',
+          dateResultatsRecus: s.dateResultatsRecus || '',
+          rapportRef: s.rapportRef || '',
+          rapportUrl: s.rapportUrl || '',
+          motifNonConforme: s.motifNonConforme || '',
+          history: Array.isArray(s.history) ? s.history : []
+        };
+        computeSampleDates(ns, fluxConfigMig[row.fluxkey], row.startdate, sampleConfigMig);
+        newSamples.push(ns);
+      }
+
+      await client.query(
+        'UPDATE batches SET samples = $1::jsonb WHERE id = $2',
+        [JSON.stringify(newSamples), row.id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (username, action_type, resource_id, description)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          'Système',
+          'SAMPLE_MIGRATE',
+          row.id,
+          `Migration échantillons du lot ${row.id} : ${raw.length} ancien(s) → ${newSamples.length} test(s) au nouveau format (clés ${newSamples.map((x: any) => x.type).join(', ') || 'aucune'})`
+        ]
+      );
+    }
+
+    // --- Migration idempotente : champ `partner` sur les samples au nouveau format ---
+    const batchesForPartner = await client.query("SELECT id, samples FROM batches");
+    for (const row of batchesForPartner.rows) {
+      const arr = typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || []);
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+
+      const needsPartner = arr.some((s: any) => s && !('partner' in s));
+      if (!needsPartner) continue;
+
+      for (const s of arr) {
+        if (!s || 'partner' in s) continue;
+        s.partner = s.applicable === true ? (SAMPLE_DEFAULT_PARTNER[s.type] || '') : '';
+      }
+
+      await client.query(
+        'UPDATE batches SET samples = $1::jsonb WHERE id = $2',
+        [JSON.stringify(arr), row.id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (username, action_type, resource_id, description)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          'Système',
+          'SAMPLE_MIGRATE',
+          row.id,
+          `Initialisation du champ partenaire des échantillons du lot ${row.id}`
+        ]
+      );
+    }
+
+    // --- Migration idempotente : nouveaux champs optionnels sur les samples ---
+    const NEW_SAMPLE_FIELDS: Record<string, any> = {
+      datePrelevementReel: '',
+      dateResultatsRecus: '',
+      rapportRef: '',
+      rapportUrl: '',
+      motifNonConforme: '',
+      history: []
+    };
+    const batchesForNewFields = await client.query("SELECT id, samples FROM batches");
+    for (const row of batchesForNewFields.rows) {
+      const arr = typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || []);
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+
+      const needs = arr.some((s: any) => s && Object.keys(NEW_SAMPLE_FIELDS).some(k => !(k in s)));
+      if (!needs) continue;
+
+      for (const s of arr) {
+        if (!s) continue;
+        for (const [k, v] of Object.entries(NEW_SAMPLE_FIELDS)) {
+          if (!(k in s)) s[k] = Array.isArray(v) ? [] : v;
+        }
+      }
+
+      await client.query(
+        'UPDATE batches SET samples = $1::jsonb WHERE id = $2',
+        [JSON.stringify(arr), row.id]
+      );
+    }
+
+    // --- Migration idempotente : champ businessDays sur sampleConfig ---
+    const cfgRow = await client.query("SELECT value FROM settings WHERE key = 'sampleConfig'");
+    if (cfgRow.rows.length > 0) {
+      const cfg = cfgRow.rows[0].value || {};
+      if (!('businessDays' in cfg)) {
+        cfg.businessDays = false;
+        await client.query(
+          "UPDATE settings SET value = $1 WHERE key = 'sampleConfig'",
+          [JSON.stringify(cfg)]
+        );
+      }
     }
 
     await client.query('COMMIT');
@@ -684,46 +960,75 @@ async function recalculateBatchDates(batch: any) {
     const configResult = await pool.query("SELECT value FROM settings WHERE key = 'fluxConfig'");
     const fluxConfig = configResult.rows[0]?.value || {};
     const flux = fluxConfig[batch.fluxKey];
-    
+
+    const sampleCfgRes = await pool.query("SELECT value FROM settings WHERE key = 'sampleConfig'");
+    const sampleConfig = sampleCfgRes.rows[0]?.value || DEFAULT_SAMPLE_CONFIG;
+
     if (batch.startDate) {
       const startDate = new Date(batch.startDate);
       if (!isNaN(startDate.getTime())) {
-        // 1. Recalculate endDate
+        // 1. Recalculate endDate (leadtime total du flux)
         if (flux) {
           const leadTimeWeeks = (Object.values(flux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
           const endDate = new Date(startDate);
           endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
           batch.endDate = endDate.toISOString().split('T')[0];
         }
-        
-        // 2. Recalculate samples
-        if (batch.samples) {
-          const samples = typeof batch.samples === 'string' ? JSON.parse(batch.samples) : batch.samples;
-          if (Array.isArray(samples)) {
-            samples.forEach((s: any) => {
-              if (s.applicable) {
-                let daysToAdd = 0;
-                const typeUpper = s.type.toUpperCase();
-                if (typeUpper.includes('BIOCHARGE')) daysToAdd = 7;
-                else if (typeUpper.includes('EPC') || typeUpper.includes('ENDOTOXINE')) daysToAdd = 21;
-                
-                if (daysToAdd > 0) {
-                  const expDate = new Date(startDate);
-                  expDate.setDate(expDate.getDate() + daysToAdd);
-                  s.expectedDate = expDate.toISOString().split('T')[0];
-                }
-              } else {
-                s.expectedDate = '';
-              }
-            });
-            batch.samples = samples;
-          }
-        }
+      }
+    }
+
+    // 2. Recalculate samples (Calcul 1 + Calcul 2 + configError), indépendant de startDate valide
+    if (batch.samples) {
+      const samples = typeof batch.samples === 'string' ? JSON.parse(batch.samples) : batch.samples;
+      if (Array.isArray(samples)) {
+        samples.forEach((s: any) => computeSampleDates(s, flux, batch.startDate, sampleConfig));
+        batch.samples = samples;
       }
     }
   } catch (err) {
     console.error('Error in recalculateBatchDates:', err);
   }
+}
+
+// Validation des samples. Règles :
+//  - status ≥ ENVOYE exige dateEnvoi
+//  - RESULTATS_RECUS (et au-delà) exige dateResultatsRecus
+//  - NON_CONFORME exige motifNonConforme
+//  - transition statut courant → cible doit être valide (séquence verrouillée)
+// `prevSamples` (optionnel) = état précédent pour valider les transitions. Retourne message FR ou null.
+function validateSamples(samples: any, prevSamples?: any): string | null {
+  const arr = typeof samples === 'string' ? JSON.parse(samples) : samples;
+  if (!Array.isArray(arr)) return null;
+  const prevArr = prevSamples
+    ? (typeof prevSamples === 'string' ? JSON.parse(prevSamples) : prevSamples)
+    : null;
+  const STATUS_RESULTS_DONE = ['RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'];
+
+  for (const s of arr) {
+    if (!s || !s.applicable) continue;
+
+    if (STATUS_AFTER_ENVOI.includes(s.status) && !s.dateEnvoi) {
+      return `Le test « ${s.type} » a un statut « ${s.status} » sans date d'envoi. Veuillez renseigner la date d'envoi.`;
+    }
+    if (STATUS_RESULTS_DONE.includes(s.status) && !s.dateResultatsRecus) {
+      return `Le test « ${s.type} » a un statut « ${s.status} » sans date de réception des résultats. Veuillez la renseigner.`;
+    }
+    if (s.status === 'NON_CONFORME' && !(s.motifNonConforme && String(s.motifNonConforme).trim())) {
+      return `Le test « ${s.type} » est « Non conforme » sans motif. Veuillez saisir un motif.`;
+    }
+
+    // Transition verrouillée (uniquement si on connaît l'état précédent du même test)
+    if (Array.isArray(prevArr)) {
+      const prev = prevArr.find((p: any) => p && p.type === s.type);
+      if (prev && prev.applicable && prev.status !== s.status) {
+        const allowed = SAMPLE_STATUS_TRANSITIONS[prev.status] || [];
+        if (!allowed.includes(s.status)) {
+          return `Transition de statut invalide pour le test « ${s.type} » : « ${prev.status} » → « ${s.status} » n'est pas autorisée.`;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 async function syncDeliveryForBatch(client: any, batch: any) {
@@ -782,6 +1087,11 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
     const axesError = validateAxes(batch.process_stage, batch.quality_status);
     if (axesError) {
       return res.status(400).json({ error: axesError });
+    }
+
+    const sampleError = validateSamples(batch.samples);
+    if (sampleError) {
+      return res.status(400).json({ error: sampleError });
     }
 
     // Recalculate dates before saving
@@ -866,6 +1176,12 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
       if (axesError) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: axesError });
+      }
+
+      const sampleError = validateSamples(mergedBatch.samples, currentBatch.samples);
+      if (sampleError) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: sampleError });
       }
 
       // Parse samples if string
@@ -1152,6 +1468,60 @@ app.put('/api/settings/statuses', authenticateToken, requireRole('admin'), async
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating statuses:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/settings/sampleConfig', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'sampleConfig'");
+    const config = result.rows.length > 0 ? result.rows[0].value : DEFAULT_SAMPLE_CONFIG;
+    res.json(config);
+  } catch (error) {
+    console.error('Error fetching sampleConfig:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings/sampleConfig', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const config = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('sampleConfig', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [JSON.stringify(config)]
+    );
+    broadcast('settings:updated', { key: 'sampleConfig', config });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating sampleConfig:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/settings/samplePartners', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'samplePartners'");
+    const partners = result.rows.length > 0 ? result.rows[0].value : DEFAULT_SAMPLE_PARTNERS;
+    res.json(partners);
+  } catch (error) {
+    console.error('Error fetching samplePartners:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings/samplePartners', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const partners = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('samplePartners', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [JSON.stringify(partners)]
+    );
+    broadcast('settings:updated', { key: 'samplePartners', partners });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating samplePartners:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });

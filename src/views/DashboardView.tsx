@@ -2,39 +2,34 @@ import React, { useState } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { Batch } from '../types';
-import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH } from '../constants';
+import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, SAMPLE_TESTS, computeSampleDelays } from '../constants';
 import { AlertTriangle, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 const PROCESS_STAGE_LABELS: Record<string, string> = Object.fromEntries(PROCESS_STAGES.map(s => [s.value, s.label]));
 const QUALITY_STATUS_MAP = Object.fromEntries(QUALITY_STATUSES.map(s => [s.value, s]));
 const SCHEDULE_HEALTH_MAP = Object.fromEntries(SCHEDULE_HEALTH.map(s => [s.value, s]));
 
+const DELAY_TYPE_LABELS: Record<string, string> = {
+  RECEPTION: 'Envoi/réception en retard',
+  RESULTATS: 'Résultats en retard'
+};
+
+// Construit un tooltip détaillé listant chaque test concerné + type de retard + date d'échéance.
 function getSampleAlertMessage(batch: Batch): string | null {
-  if (!batch || !batch.samples) return null;
-  
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
-  
-  const alerts: string[] = [];
-  
-  batch.samples.forEach(s => {
-    if (!s || !s.applicable) return;
-    
-    // Condition 1: sendDate > expectedDate
-    if (s.sendDate && s.expectedDate && s.sendDate > s.expectedDate) {
-      alerts.push(`${s.type} : Envoyé le ${s.sendDate} (Dépassé, attendu le ${s.expectedDate})`);
-    }
-    // Condition 2: no sendDate (or not sent) and expectedDate is past
-    else if (!s.sendDate && s.expectedDate && s.expectedDate < todayStr) {
-      alerts.push(`${s.type} : Non envoyé (Retard, attendu le ${s.expectedDate})`);
-    }
+  const delays = computeSampleDelays(batch?.samples);
+  if (delays.length === 0) return null;
+
+  const lines = delays.map(d => {
+    const testLabel = SAMPLE_TESTS.find(t => t.key === d.sample.type)?.label || d.sample.type;
+    const detail = d.type === 'RECEPTION'
+      ? `prélèvement non envoyé, réception théorique dépassée le ${d.dueDate}`
+      : `résultats attendus le ${d.dueDate}, non reçus`;
+    return `• ${testLabel} — ${DELAY_TYPE_LABELS[d.type]} (${detail}, ${d.daysLate} j de retard)`;
   });
-  
-  if (alerts.length === 0) return null;
-  return `Alerte échantillons :\n` + alerts.join('\n');
+
+  // Récapitulatif des types de retard présents pour ce lot
+  const types = Array.from(new Set(delays.map(d => DELAY_TYPE_LABELS[d.type])));
+  return `Alerte échantillons (${types.join(' + ')}) :\n` + lines.join('\n');
 }
 
 interface DashboardViewProps {
@@ -113,7 +108,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
     }
     if (Array.isArray(b.samples)) {
       b.samples.forEach(s => {
-        if (s && s.applicable && !s.sent) testsCount++;
+        if (s && s.applicable && s.status === 'A_ENVOYER') testsCount++;
       });
     }
   });

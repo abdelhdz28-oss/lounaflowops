@@ -10,12 +10,29 @@ export interface FluxConfig {
   durations: Record<Step, number>;
 }
 
+export type SampleStatus = 'A_ENVOYER' | 'ENVOYE' | 'RESULTATS_RECUS' | 'CONFORME' | 'NON_CONFORME';
+
 export interface Sample {
-  type: string;
-  applicable: boolean;
-  sent: boolean;
-  sendDate: string;
-  expectedDate: string;
+  type: string;                       // clé : INTERTEK_BIO | INTERTEK_EPC | CHARLES_RIVERS_ENDO
+  partner: string;                    // partenaire/labo ('' = non applicable)
+  applicable: boolean;                // dérivé : partner non vide
+  status: SampleStatus;
+  dateEnvoi: string;                  // saisie
+  dateReceptionEchantillon: string;   // calculé (Calcul 1), lecture seule
+  dateResultatsAttendue: string;      // calculé (Calcul 2), lecture seule
+  configError?: boolean;              // true si la fiche produit n'a pas l'étape de prélèvement
+  datePrelevementReel?: string;       // saisie, optionnelle : date de prélèvement réelle (distincte de la réception théorique)
+  dateResultatsRecus?: string;        // saisie, obligatoire pour passer à RESULTATS_RECUS
+  rapportRef?: string;                // n° de rapport labo
+  rapportUrl?: string;                // lien certificat (URL texte, pas d'upload)
+  motifNonConforme?: string;          // obligatoire si status = NON_CONFORME
+  history?: any[];                    // snapshots des essais précédents (re-test)
+}
+
+export interface SampleConfig {
+  mapping: Record<string, ProcessStage>;
+  analysisLeadDays: Record<string, number>;
+  businessDays?: boolean;             // si true, les calculs de dates sautent samedis/dimanches (jours fériés non gérés)
 }
 
 export interface Batch {

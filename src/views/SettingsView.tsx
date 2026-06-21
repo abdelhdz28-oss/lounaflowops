@@ -1,12 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
-import { FluxConfig } from '../types';
+import { FluxConfig, SampleConfig, ProcessStage } from '../types';
+import { SAMPLE_TESTS, PROCESS_STAGES, DEFAULT_SAMPLE_CONFIG } from '../constants';
 import { Plus, Trash2 } from 'lucide-react';
 
+// Étapes de prélèvement sélectionnables pour les tests labo
+const SAMPLE_STAGE_OPTIONS = PROCESS_STAGES.filter(p => p.value !== 'EXPEDIE');
+
 export function SettingsView() {
-  const { fluxConfig, updateSettings, resetData } = useAppContext();
+  const { fluxConfig, sampleConfig, samplePartners, updateSettings, updateSampleConfig, updateSamplePartners, resetData } = useAppContext();
   const [localConfig, setLocalConfig] = useState<Record<string, FluxConfig>>({});
+  const [localSampleConfig, setLocalSampleConfig] = useState<SampleConfig>(DEFAULT_SAMPLE_CONFIG);
+  const [localPartners, setLocalPartners] = useState<string[]>([]);
+  const [newPartner, setNewPartner] = useState('');
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPassword, setResetPassword] = useState('');
 
@@ -30,6 +37,56 @@ export function SettingsView() {
       setLocalConfig(mapped);
     }
   }, [fluxConfig]);
+
+  useEffect(() => {
+    if (sampleConfig) {
+      setLocalSampleConfig(JSON.parse(JSON.stringify(sampleConfig)));
+    }
+  }, [sampleConfig]);
+
+  useEffect(() => {
+    setLocalPartners([...(samplePartners || [])]);
+  }, [samplePartners]);
+
+  const handleAddPartner = () => {
+    const trimmed = newPartner.trim();
+    if (!trimmed) return;
+    if (localPartners.includes(trimmed)) {
+      alert('Ce partenaire existe déjà !');
+      return;
+    }
+    setLocalPartners(prev => [...prev, trimmed]);
+    setNewPartner('');
+  };
+
+  const handleDeletePartner = (name: string) => {
+    setLocalPartners(prev => prev.filter(p => p !== name));
+  };
+
+  const handleSavePartners = async () => {
+    const ok = await updateSamplePartners(localPartners);
+    alert(ok ? 'Partenaires enregistrés !' : 'Erreur lors de l\'enregistrement.');
+  };
+
+  const handleSampleMappingChange = (testKey: string, stage: ProcessStage) => {
+    setLocalSampleConfig(prev => ({
+      ...prev,
+      mapping: { ...prev.mapping, [testKey]: stage }
+    }));
+  };
+
+  const handleSampleLeadChange = (testKey: string, value: string) => {
+    const num = parseInt(value, 10);
+    setLocalSampleConfig(prev => ({
+      ...prev,
+      analysisLeadDays: { ...prev.analysisLeadDays, [testKey]: isNaN(num) ? 0 : num }
+    }));
+  };
+
+  const handleSaveSampleConfig = async () => {
+    const ok = await updateSampleConfig(localSampleConfig);
+    alert(ok ? 'Paramètres échantillons enregistrés !' : 'Erreur lors de l\'enregistrement.');
+  };
 
   const handleDurationChange = (key: string, step: string, value: string) => {
     const num = parseInt(value, 10);
@@ -130,7 +187,7 @@ export function SettingsView() {
 
   const handleSave = async () => {
     // Validate that no step name is empty and there are no duplicates
-    for (const [key, flux] of Object.entries(localConfig)) {
+    for (const [key, flux] of Object.entries(localConfig) as [string, FluxConfig][]) {
       if (flux.steps.some(step => !step.trim())) {
         alert(`Veuillez renseigner tous les noms d'étapes pour le produit "${flux.name}".`);
         return;
@@ -231,6 +288,115 @@ export function SettingsView() {
             </div>
           );
         })}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm mb-8">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-slate-800">Paramètres Échantillons / Tests</h3>
+          <button
+            onClick={handleSaveSampleConfig}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
+          >
+            Enregistrer
+          </button>
+        </div>
+        <p className="text-sm text-slate-500 mb-4">
+          Étape de prélèvement (où l'échantillon est prélevé dans le flux) et délai d'analyse (envoi → résultats) pour chaque test labo.
+        </p>
+        <label className="flex items-start gap-2 mb-4 p-3 bg-slate-50 border border-slate-200 rounded-lg cursor-pointer">
+          <input
+            type="checkbox"
+            checked={!!localSampleConfig.businessDays}
+            onChange={e => setLocalSampleConfig(prev => ({ ...prev, businessDays: e.target.checked }))}
+            className="mt-0.5"
+          />
+          <span className="text-sm text-slate-700">
+            <span className="font-semibold">Calcul des dates en jours ouvrés</span>
+            <span className="block text-xs text-slate-500">
+              Si activé, les calculs de dates (réception et résultats) sautent les samedis et dimanches. Les jours fériés ne sont pas gérés.
+            </span>
+          </span>
+        </label>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {SAMPLE_TESTS.map(t => (
+            <div key={t.key} className="border border-slate-200 rounded-lg p-4 flex flex-col gap-3">
+              <h4 className="text-sm font-bold text-blue-600">{t.label}</h4>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-slate-600">Étape de prélèvement</label>
+                <select
+                  value={localSampleConfig.mapping?.[t.key] || t.defaultStage}
+                  onChange={e => handleSampleMappingChange(t.key, e.target.value as ProcessStage)}
+                  className="px-2 py-1.5 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                >
+                  {SAMPLE_STAGE_OPTIONS.map(ps => (
+                    <option key={ps.value} value={ps.value}>{ps.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-slate-600">Délai d'analyse (jours)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={localSampleConfig.analysisLeadDays?.[t.key] ?? 0}
+                  onChange={e => handleSampleLeadChange(t.key, e.target.value)}
+                  className="w-24 px-2 py-1.5 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm mb-8">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-slate-800">Partenaires / Laboratoires</h3>
+          <button
+            onClick={handleSavePartners}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
+          >
+            Enregistrer
+          </button>
+        </div>
+        <p className="text-sm text-slate-500 mb-4">
+          Liste des partenaires / laboratoires sélectionnables pour chaque test d'échantillon.
+        </p>
+        <div className="flex flex-col gap-2 mb-4">
+          {localPartners.length === 0 && (
+            <p className="text-sm text-slate-400 italic">Aucun partenaire configuré.</p>
+          )}
+          {localPartners.map(p => (
+            <div key={p} className="flex justify-between items-center gap-2 px-3 py-2 border border-slate-200 rounded-lg">
+              <span className="text-sm font-medium text-slate-700">{p}</span>
+              <button
+                type="button"
+                onClick={() => handleDeletePartner(p)}
+                className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0"
+                title="Supprimer ce partenaire"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newPartner}
+            onChange={e => setNewPartner(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddPartner(); } }}
+            placeholder="Nom du partenaire / laboratoire"
+            className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+          />
+          <button
+            type="button"
+            onClick={handleAddPartner}
+            className="px-3 py-2 bg-blue-50 border border-blue-200 text-blue-600 rounded-md hover:bg-blue-100 transition-colors flex items-center gap-1.5 shrink-0 text-sm font-medium"
+          >
+            <Plus className="w-4 h-4" />
+            Ajouter
+          </button>
+        </div>
       </div>
 
       <div className="bg-red-50 border border-red-200 rounded-xl p-6 shadow-sm">
