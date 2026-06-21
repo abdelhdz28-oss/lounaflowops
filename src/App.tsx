@@ -31,8 +31,8 @@ function AppContent() {
   }
 
   const titles: Record<string, string> = {
-    'dashboard': 'Tableau de bord',
-    'planning': 'Planning',
+    'dashboard': 'Tracking Production',
+    'planning': 'Planning de Fabrication',
     'quality': 'Qualité',
     'data': 'Data Historique',
     'deliveries': 'Livraisons Clients',

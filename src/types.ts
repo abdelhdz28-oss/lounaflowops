@@ -1,7 +1,7 @@
 export type Step = string;
 
-export type ProcessStage = 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
-export type QualityStatus = 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
+export type ProcessStage = 'PLANIFIE' | 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
+export type QualityStatus = 'NOT_STARTED' | 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
 export type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
 
 export interface FluxConfig {
@@ -27,6 +27,11 @@ export interface Sample {
   rapportUrl?: string;                // lien certificat (URL texte, pas d'upload)
   motifNonConforme?: string;          // obligatoire si status = NON_CONFORME
   history?: any[];                    // snapshots des essais précédents (re-test)
+}
+
+export interface MilestoneCheck {
+  done: boolean;
+  doneDate?: string;
 }
 
 export interface SampleConfig {
@@ -58,6 +63,7 @@ export interface Batch {
   sold: number;
   palettes: number;
   samples: Sample[];
+  milestones?: { CONDI_PRIM: MilestoneCheck; CONDI_SEC: MilestoneCheck; LIBERATION: MilestoneCheck };
 }
 
 export interface Delivery {
@@ -73,4 +79,13 @@ export interface Delivery {
 export interface Product {
   name: string;
   ref: string;
+}
+
+export interface ProductCatalogEntry {
+  type: string;                          // type de produit
+  name: string;                          // nom produit
+  ref: string;                           // référence
+  condit: number;                        // nb de contenants par boîte
+  contenant: 'FLACON' | 'SERINGUE';      // type de contenant
+  volume: number;                        // volume d'un contenant (mL)
 }

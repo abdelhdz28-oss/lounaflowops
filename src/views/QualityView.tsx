@@ -14,7 +14,7 @@ interface QualityViewProps {
 }
 
 export function QualityView({ onOpenBatch }: QualityViewProps) {
-  const { batches } = useAppContext();
+  const { batches, productCatalog } = useAppContext();
 
   // Agrégat de tous les lots × tests applicables en retard.
   const overdueRows = batches.flatMap(b =>
@@ -85,8 +85,8 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Lot</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produit (Réf)</th>
-              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Suivi Échantillons</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Taux de Rejet</th>
+              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Rendement</th>
             </tr>
           </thead>
           <tbody>
@@ -94,6 +94,14 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
               // Pas de calcul tant que Quantité répartie ET Miré conforme ne sont pas saisis → « — »
               const hasData = b.distributed > 0 && b.conform > 0;
               const rate = hasData ? ((b.distributed - b.conform) / b.distributed) * 100 : 0;
+
+              // Rendement de production = (boîtes produites × condit × volume) / (volume lot en L × 1000) × 100
+              const catalogEntry = productCatalog.find(p => p.ref === b.reference);
+              const hasYield = b.sold > 0 && b.volume > 0 && !!catalogEntry
+                && catalogEntry.condit > 0 && catalogEntry.volume > 0;
+              const yieldPct = hasYield
+                ? (b.sold * catalogEntry!.condit * catalogEntry!.volume) / (b.volume * 1000) * 100
+                : 0;
 
               return (
                 <tr 
@@ -108,28 +116,11 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
                       <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-mono">{b.reference}</span>
                     </div>
                   </td>
-                  <td className="py-3 px-4">
-                    <div className="flex gap-1.5 flex-wrap">
-                      {b.samples.filter(s => s.applicable).map((s, idx) => {
-                        const label = SAMPLE_TESTS.find(t => t.key === s.type)?.label.split('-')[0] || s.type;
-                        return (
-                          <span
-                            key={idx}
-                            className={cn(
-                              "inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold",
-                              s.status === 'CONFORME' ? "bg-green-100 text-green-800"
-                                : s.status === 'NON_CONFORME' ? "bg-red-100 text-red-800"
-                                : "bg-orange-100 text-orange-800"
-                            )}
-                          >
-                            {label}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </td>
                   <td className={cn("py-3 px-4 font-bold", hasData && rate > 5 ? "text-red-600" : "text-slate-700")}>
                     {hasData ? `${rate.toFixed(2)}%` : '—'}
+                  </td>
+                  <td className={cn("py-3 px-4 font-bold", hasYield ? "text-emerald-700" : "text-slate-400")}>
+                    {hasYield ? `${yieldPct.toFixed(2)}%` : '—'}
                   </td>
                 </tr>
               );

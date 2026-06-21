@@ -40,6 +40,7 @@ export const FLUX_DEFAULTS = {
 
 // Axe 1 : Étape process (séquentiel, ordonné)
 export const PROCESS_STAGES: { value: import('./types').ProcessStage; label: string }[] = [
+  { value: 'PLANIFIE', label: 'Planifié' },
   { value: 'FORMULATION', label: 'Formulation' },
   { value: 'CONDI_PRIM', label: 'Conditionnement primaire' },
   { value: 'CONDI_SEC', label: 'Conditionnement secondaire' },
@@ -49,6 +50,7 @@ export const PROCESS_STAGES: { value: import('./types').ProcessStage; label: str
 
 // Axe 2 : Statut qualité (décision QA)
 export const QUALITY_STATUSES: { value: import('./types').QualityStatus; label: string; color: string }[] = [
+  { value: 'NOT_STARTED', label: 'Non démarré', color: 'bg-slate-100 text-slate-500 border-slate-200' },
   { value: 'EN_COURS', label: 'En cours', color: 'bg-slate-100 text-slate-700 border-slate-200' },
   { value: 'QUARANTAINE', label: 'Quarantaine', color: 'bg-amber-100 text-amber-700 border-amber-200' },
   { value: 'LIBERE', label: 'Libéré', color: 'bg-green-100 text-green-700 border-green-200' },
@@ -102,7 +104,7 @@ export function deliveryStatusFromBatch(batch: import('./types').Batch | undefin
   if (!batch) return 'A_PLANIFIER';
   if (batch.process_stage === 'EXPEDIE') return 'ENLEVE';
   if (batch.quality_status === 'LIBERE') return 'PRET';
-  if (batch.process_stage === 'FORMULATION') return 'A_PLANIFIER';
+  if (batch.process_stage === 'PLANIFIE' || batch.process_stage === 'FORMULATION') return 'A_PLANIFIER';
   return 'EN_PRODUCTION';
 }
 
@@ -341,6 +343,19 @@ function daysFromToday(dateStr: string | undefined): number | null {
 // Calcule le statut agrégé du lot pour les 3 étapes (réception / envoi / résultats),
 // statut le plus grave parmi les tests applicables. Détails formatés pour tooltip.
 export function computeSampleMilestones(batch: Batch | undefined): SampleMilestones {
+  // Lot planifié / non démarré : aucun calcul de retard, tout gris (na).
+  if (batch?.process_stage === 'PLANIFIE') {
+    return {
+      reception: 'na',
+      envoi: 'na',
+      resultats: 'na',
+      details: {
+        reception: 'Réception échantillon : lot planifié (non démarré)',
+        envoi: 'Envoi au labo : lot planifié (non démarré)',
+        resultats: 'Résultats : lot planifié (non démarré)'
+      }
+    };
+  }
   const samples = Array.isArray(batch?.samples) ? batch!.samples : [];
   const applicables = samples.filter(s => s && s.applicable);
 
@@ -426,6 +441,104 @@ export function computeSampleMilestones(batch: Batch | undefined): SampleMilesto
     }
   };
 }
+
+// --- Jalons de production (3 jalons par lot) ---
+// Stages suivis comme jalons. CONDI_PRIM = Fin Condi. Primaire, etc.
+export type ProductionMilestoneStage = 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION';
+
+export const PRODUCTION_MILESTONES: { key: ProductionMilestoneStage; label: string }[] = [
+  { key: 'CONDI_PRIM', label: 'Fin Condi. Primaire' },
+  { key: 'CONDI_SEC', label: 'Fin Condi. Secondaire' },
+  { key: 'LIBERATION', label: 'Fin Libération' }
+];
+
+// Date prévue d'un jalon de stage S : startDate + (somme des durées des étapes du flux,
+// en ignorant '-', depuis le début jusqu'à la DERNIÈRE étape dont deriveStageFromStepLabel === S
+// incluse) × 7 jours. Pas de date si aucune étape ne mappe le stage ou pas de flux/startDate.
+export function computeMilestoneDates(
+  flux: FluxConfig | undefined,
+  startDate: string | undefined
+): { CONDI_PRIM?: string; CONDI_SEC?: string; LIBERATION?: string } {
+  const result: { CONDI_PRIM?: string; CONDI_SEC?: string; LIBERATION?: string } = {};
+  if (!flux || !startDate) return result;
+  const start = new Date(startDate);
+  if (isNaN(start.getTime())) return result;
+
+  // Pour chaque stage, on cumule les semaines jusqu'à la dernière étape qui mappe le stage.
+  let weeks = 0;
+  const lastWeeksForStage: Partial<Record<ProductionMilestoneStage, number>> = {};
+  for (const label of flux.steps) {
+    if (label === '-') continue;
+    weeks += flux.durations[label] || 0;
+    const stage = deriveStageFromStepLabel(label);
+    if (stage === 'CONDI_PRIM' || stage === 'CONDI_SEC' || stage === 'LIBERATION') {
+      lastWeeksForStage[stage] = weeks;
+    }
+  }
+
+  for (const m of PRODUCTION_MILESTONES) {
+    const w = lastWeeksForStage[m.key];
+    if (w === undefined) continue;
+    const d = new Date(start);
+    d.setDate(d.getDate() + w * 7);
+    result[m.key] = d.toISOString().split('T')[0];
+  }
+  return result;
+}
+
+// Statut couleur d'un jalon de production.
+export function milestoneStatus(
+  datePrevue: string | undefined,
+  done: boolean
+): 'ok' | 'warn' | 'late' | 'na' {
+  if (done) return 'ok';
+  if (!datePrevue) return 'na';
+  const d = new Date(datePrevue);
+  if (isNaN(d.getTime())) return 'na';
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays < 0) return 'late';
+  if (diffDays <= SAMPLE_DUE_SOON_DAYS) return 'warn';
+  return 'ok';
+}
+
+// Couleurs Tailwind par statut de jalon (badges).
+export const MILESTONE_STATUS_COLOR: Record<'ok' | 'warn' | 'late' | 'na', string> = {
+  ok: 'bg-green-100 text-green-700 border-green-200',
+  warn: 'bg-orange-100 text-orange-700 border-orange-200',
+  late: 'bg-red-100 text-red-700 border-red-200',
+  na: 'bg-slate-100 text-slate-500 border-slate-200'
+};
+
+// Valeur par défaut des jalons (lot neuf / lot sans jalons).
+export function defaultMilestones(): { CONDI_PRIM: MilestoneCheck; CONDI_SEC: MilestoneCheck; LIBERATION: MilestoneCheck } {
+  return { CONDI_PRIM: { done: false }, CONDI_SEC: { done: false }, LIBERATION: { done: false } };
+}
+
+import type { ProductCatalogEntry, MilestoneCheck } from './types';
+
+// Catalogue produits configurable (réglage 'productCatalog'). Source unique pour
+// l'auto-remplissage des fiches lot et le calcul du rendement de production.
+export const DEFAULT_PRODUCT_CATALOG: ProductCatalogEntry[] = [
+  { type: 'HYDRAGEL A1 DM', name: 'INNOVYAL LIGHTENING ACTION', ref: 'DB-ILA', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A1 COS', name: 'INNOVYAL LIGHTENING ACTION', ref: 'DB-ILA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 DM', name: 'INNOVYAL REGENERATIVE ACTION', ref: 'DB-IRA', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 COS', name: 'INNOVYAL REGENERATIVE ACTION', ref: 'DB-IRA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A3 COS', name: 'INNOVYAL HAIR ACTION', ref: 'DB-IHA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'STIM', name: 'HYDROXYAL', ref: 'DF-STIM0', condit: 1, contenant: 'SERINGUE', volume: 1.5 },
+  { type: 'STIM +', name: 'HYDROXYAL +', ref: 'DF-STIM1', condit: 1, contenant: 'SERINGUE', volume: 1.5 },
+  { type: 'EXOSOME', name: 'EXOVYAL', ref: 'EXOSOME X1', condit: 1, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 SYRINGE', name: 'INNOVYAL REGENERATIVE ACTION -LIFT', ref: 'DB-IRA-S', condit: 2, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR1-LOUNA FILLERS', name: 'INSTANT REFINE', ref: 'DF-HAR1-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR2-LOUNA FILLERS', name: 'SHAPE & VOLUME', ref: 'DF-HAR2-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR2L-LOUNA FILLERS', name: 'GLOSSY LIPS', ref: 'DF-HAR2-L-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR3-LOUNA FILLERS', name: 'MAXI LIFT', ref: 'DF-HAR3-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR1-ESSENTYAL', name: 'TOUCH', ref: 'DF-HAR1-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR2-ESSENTYAL', name: 'VOLUME', ref: 'DF-HAR2-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR2L-ESSENTYAL', name: 'LIPS', ref: 'DF-HAR2-L-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR3-ESSENTYAL', name: 'EXTREME', ref: 'DF-HAR3-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 }
+];
 
 export const PRODUCT_CATALOG = [
   { name: 'INNOVYAL LIGHTENING', ref: 'DB-ILA' },

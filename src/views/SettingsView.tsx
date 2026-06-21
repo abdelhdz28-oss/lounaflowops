@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
-import { FluxConfig, SampleConfig, ProcessStage } from '../types';
+import { FluxConfig, SampleConfig, ProcessStage, ProductCatalogEntry } from '../types';
 import { SAMPLE_TESTS, PROCESS_STAGES, DEFAULT_SAMPLE_CONFIG } from '../constants';
 import { Plus, Trash2 } from 'lucide-react';
 
@@ -9,11 +9,12 @@ import { Plus, Trash2 } from 'lucide-react';
 const SAMPLE_STAGE_OPTIONS = PROCESS_STAGES.filter(p => p.value !== 'EXPEDIE');
 
 export function SettingsView() {
-  const { fluxConfig, sampleConfig, samplePartners, updateSettings, updateSampleConfig, updateSamplePartners, resetData } = useAppContext();
+  const { fluxConfig, sampleConfig, samplePartners, productCatalog, updateSettings, updateSampleConfig, updateSamplePartners, updateProductCatalog, resetData } = useAppContext();
   const [localConfig, setLocalConfig] = useState<Record<string, FluxConfig>>({});
   const [localSampleConfig, setLocalSampleConfig] = useState<SampleConfig>(DEFAULT_SAMPLE_CONFIG);
   const [localPartners, setLocalPartners] = useState<string[]>([]);
   const [newPartner, setNewPartner] = useState('');
+  const [localCatalog, setLocalCatalog] = useState<ProductCatalogEntry[]>([]);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPassword, setResetPassword] = useState('');
 
@@ -47,6 +48,40 @@ export function SettingsView() {
   useEffect(() => {
     setLocalPartners([...(samplePartners || [])]);
   }, [samplePartners]);
+
+  useEffect(() => {
+    setLocalCatalog(JSON.parse(JSON.stringify(productCatalog || [])));
+  }, [productCatalog]);
+
+  const handleCatalogChange = (idx: number, field: keyof ProductCatalogEntry, value: string) => {
+    setLocalCatalog(prev => {
+      const next = [...prev];
+      const entry = { ...next[idx] };
+      if (field === 'condit' || field === 'volume') {
+        const num = parseFloat(value);
+        (entry[field] as number) = isNaN(num) ? 0 : num;
+      } else if (field === 'contenant') {
+        entry.contenant = value as ProductCatalogEntry['contenant'];
+      } else {
+        (entry[field] as string) = value;
+      }
+      next[idx] = entry;
+      return next;
+    });
+  };
+
+  const handleAddCatalogRow = () => {
+    setLocalCatalog(prev => [...prev, { type: '', name: '', ref: '', condit: 1, contenant: 'FLACON', volume: 0 }]);
+  };
+
+  const handleDeleteCatalogRow = (idx: number) => {
+    setLocalCatalog(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleSaveCatalog = async () => {
+    const ok = await updateProductCatalog(localCatalog);
+    alert(ok ? 'Catalogue produits enregistré !' : 'Erreur lors de l\'enregistrement.');
+  };
 
   const handleAddPartner = () => {
     const trimmed = newPartner.trim();
@@ -397,6 +432,118 @@ export function SettingsView() {
             Ajouter
           </button>
         </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm mb-8">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-slate-800">Catalogue Produits</h3>
+          <button
+            onClick={handleSaveCatalog}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
+          >
+            Enregistrer
+          </button>
+        </div>
+        <p className="text-sm text-slate-500 mb-4">
+          Types de produits, références et variantes de conditionnement. Utilisé pour l'auto-remplissage des fiches lot et le calcul du rendement de production.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200">
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Type</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Nom</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Référence</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Cond./boîte</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contenant</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Volume contenant (mL)</th>
+                <th className="py-2 px-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {localCatalog.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-3 px-3 text-sm text-slate-400 italic">Aucun produit configuré.</td>
+                </tr>
+              )}
+              {localCatalog.map((entry, idx) => (
+                <tr key={idx} className="border-b border-slate-100">
+                  <td className="py-2 px-3">
+                    <input
+                      type="text"
+                      value={entry.type}
+                      onChange={e => handleCatalogChange(idx, 'type', e.target.value)}
+                      className="w-full px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </td>
+                  <td className="py-2 px-3">
+                    <input
+                      type="text"
+                      value={entry.name}
+                      onChange={e => handleCatalogChange(idx, 'name', e.target.value)}
+                      className="w-full px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </td>
+                  <td className="py-2 px-3">
+                    <input
+                      type="text"
+                      value={entry.ref}
+                      onChange={e => handleCatalogChange(idx, 'ref', e.target.value)}
+                      className="w-full px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none font-mono"
+                    />
+                  </td>
+                  <td className="py-2 px-3">
+                    <input
+                      type="number"
+                      min="0"
+                      value={entry.condit}
+                      onChange={e => handleCatalogChange(idx, 'condit', e.target.value)}
+                      className="w-20 px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </td>
+                  <td className="py-2 px-3">
+                    <select
+                      value={entry.contenant}
+                      onChange={e => handleCatalogChange(idx, 'contenant', e.target.value)}
+                      className="px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="FLACON">FLACON</option>
+                      <option value="SERINGUE">SERINGUE</option>
+                    </select>
+                  </td>
+                  <td className="py-2 px-3">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={entry.volume}
+                      onChange={e => handleCatalogChange(idx, 'volume', e.target.value)}
+                      className="w-24 px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </td>
+                  <td className="py-2 px-3">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteCatalogRow(idx)}
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                      title="Supprimer cette ligne"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <button
+          type="button"
+          onClick={handleAddCatalogRow}
+          className="mt-4 w-full py-2 border border-dashed border-slate-300 rounded-lg text-slate-500 hover:text-blue-600 hover:border-blue-500 hover:bg-blue-50/50 flex justify-center items-center gap-1.5 transition-all text-sm font-medium"
+        >
+          <Plus className="w-4 h-4" />
+          Ajouter un type de produit
+        </button>
       </div>
 
       <div className="bg-red-50 border border-red-200 rounded-xl p-6 shadow-sm">

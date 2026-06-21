@@ -6,7 +6,9 @@ import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus, SampleStatus } 
 import {
   PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeScheduleHealth,
   SAMPLE_TESTS, SAMPLE_STATUSES,
-  computeSampleDates, computeTestsOk, sampleDateBadgeColor, isSampleTransitionAllowed
+  computeSampleDates, computeTestsOk, sampleDateBadgeColor, isSampleTransitionAllowed,
+  PRODUCTION_MILESTONES, computeMilestoneDates, milestoneStatus, MILESTONE_STATUS_COLOR,
+  defaultMilestones, ProductionMilestoneStage
 } from '../constants';
 import { cn } from '../utils/cn';
 
@@ -22,6 +24,21 @@ function sampleStepperIndex(status: SampleStatus): number {
   if (status === 'NON_CONFORME') return 3;
   const i = SAMPLE_STEPPER.findIndex(s => s.key === status);
   return i < 0 ? 0 : i;
+}
+
+// Dérive la clé de flux à partir du type produit catalogue (comparaison en MAJUSCULES).
+// Si la clé dérivée n'existe pas dans fluxConfig, retourne null (fallback : garder le fluxKey courant).
+function fluxKeyForType(type: string, fluxConfig: Record<string, FluxConfig>): string | null {
+  const t = (type || '').toUpperCase();
+  let key: string;
+  if (t.includes('HYDRAGEL A2 SYRINGE') || t.includes('A2 SERINGUE')) key = 'Hydragel_A2_Seringue';
+  else if (t.includes('HYDRAGEL A1')) key = 'Hydragel_A1';
+  else if (t.includes('HYDRAGEL A2')) key = 'Hydragel_A2';
+  else if (t.includes('HYDRAGEL A3')) key = 'Hydragel_A3';
+  else if (t.includes('LOUNA FILLERS')) key = 'HAR_Louna';
+  else if (t.includes('ESSENTYAL')) key = 'HAR_Essentyal';
+  else key = 'Hydroxyal';
+  return fluxConfig[key] ? key : null;
 }
 
 // Hint « prochaine action » selon l'étape courante.
@@ -43,7 +60,7 @@ interface BatchDrawerProps {
 
 export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   const {
-    batches, fluxConfig, sampleConfig, catalog, updateBatch, createBatch, createDelivery,
+    batches, fluxConfig, sampleConfig, catalog, productCatalog, updateBatch, createBatch, createDelivery,
     clients, updateClients, samplePartners
   } = useAppContext();
   const { isAdmin, canEdit } = useAuth();
@@ -64,8 +81,8 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           product: '',
           stepIndex: 0,
           status: 'UPCOMING',
-          process_stage: 'FORMULATION',
-          quality_status: 'EN_COURS',
+          process_stage: 'PLANIFIE',
+          quality_status: 'NOT_STARTED',
           schedule_health: 'ON_TRACK',
           progress: 0,
           startDate: today,
@@ -92,7 +109,8 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             rapportUrl: '',
             motifNonConforme: '',
             history: []
-          }))
+          })),
+          milestones: defaultMilestones()
         });
       } else {
         setIsNew(false);
@@ -112,10 +130,27 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
 
   if (!localBatch) return null;
 
+  // Entrée catalogue du lot : match par référence (lots existants), sinon par type/nom sélectionné.
+  const catalogEntry =
+    productCatalog.find(p => p.ref === localBatch.reference) ||
+    productCatalog.find(p => p.name === localBatch.product) ||
+    null;
+  // Type catalogue courant (pour le sélecteur) : dérivé de l'entrée matchée.
+  const selectedCatalogType = catalogEntry?.type || '';
+
   const handleChange = (field: keyof Batch, value: any) => {
     setLocalBatch(prev => {
       if (!prev) return null;
       let updated = { ...prev, [field]: value };
+      if (field === 'process_stage') {
+        // Auto-lien : un lot planifié n'est pas démarré → statut qualité « Non démarré ».
+        if (value === 'PLANIFIE') {
+          updated.quality_status = 'NOT_STARTED';
+        } else if (prev.quality_status === 'NOT_STARTED') {
+          // En quittant PLANIFIE, le lot démarre : on repasse à « En cours ».
+          updated.quality_status = 'EN_COURS';
+        }
+      }
       if (field === 'startDate') {
         const startDateStr = value;
         if (startDateStr) {
@@ -191,6 +226,35 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     }
   };
 
+  // Sélection d'un type de produit depuis le catalogue : remplit product (= name), reference (= ref)
+  // et pilote le flux (fluxKey dérivé du type) → recalcule endDate + dates échantillons.
+  const handleCatalogTypeChange = (type: string) => {
+    const entry = productCatalog.find(p => p.type === type);
+    if (!entry) return;
+    setLocalBatch(prev => {
+      if (!prev) return null;
+      const derivedKey = fluxKeyForType(entry.type, fluxConfig);
+      const newFluxKey = derivedKey || prev.fluxKey;
+      let updated = { ...prev, product: entry.name, reference: entry.ref, fluxKey: newFluxKey };
+
+      // Recalculate sample dates and endDate against the new flux (comme un changement de flux)
+      const currentFlux = fluxConfig[newFluxKey];
+      updated.samples = prev.samples.map(s =>
+        computeSampleDates({ ...s }, currentFlux, prev.startDate, sampleConfig)
+      );
+      if (currentFlux && prev.startDate) {
+        const startDate = new Date(prev.startDate);
+        if (!isNaN(startDate.getTime())) {
+          const leadTimeWeeks = (Object.values(currentFlux.durations || {}) as number[]).reduce((sum: number, val: number) => sum + val, 0);
+          const endDate = new Date(startDate);
+          endDate.setDate(endDate.getDate() + leadTimeWeeks * 7);
+          updated.endDate = endDate.toISOString().split('T')[0];
+        }
+      }
+      return updated;
+    });
+  };
+
   const handleSampleChange = (index: number, field: keyof Sample, value: any) => {
     setLocalBatch(prev => {
       if (!prev) return null;
@@ -247,6 +311,33 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
       reset = computeSampleDates(reset, fluxConfig[prev.fluxKey], prev.startDate, sampleConfig);
       newSamples[index] = reset;
       return { ...prev, samples: newSamples };
+    });
+  };
+
+  // Coche « Fait » d'un jalon : set done + doneDate (aujourd'hui par défaut, modifiable).
+  const handleMilestoneDone = (stage: ProductionMilestoneStage, done: boolean) => {
+    setLocalBatch(prev => {
+      if (!prev) return null;
+      const ms = prev.milestones || defaultMilestones();
+      const today = new Date().toISOString().split('T')[0];
+      return {
+        ...prev,
+        milestones: {
+          ...ms,
+          [stage]: done ? { done: true, doneDate: ms[stage]?.doneDate || today } : { done: false }
+        }
+      };
+    });
+  };
+
+  const handleMilestoneDate = (stage: ProductionMilestoneStage, value: string) => {
+    setLocalBatch(prev => {
+      if (!prev) return null;
+      const ms = prev.milestones || defaultMilestones();
+      return {
+        ...prev,
+        milestones: { ...ms, [stage]: { done: true, doneDate: value } }
+      };
     });
   };
 
@@ -326,6 +417,41 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
         </div>
         
         <div className="flex-1 overflow-y-auto p-8">
+          {/* BANDEAU JALONS DE PRODUCTION (pire statut des 3 jalons) */}
+          {(() => {
+            const flux = fluxConfig[localBatch.fluxKey];
+            const dates = computeMilestoneDates(flux, localBatch.startDate);
+            const ms = localBatch.milestones || defaultMilestones();
+            const planifie = localBatch.process_stage === 'PLANIFIE';
+            const states = PRODUCTION_MILESTONES.map(m =>
+              planifie ? 'na' as const : milestoneStatus(dates[m.key], !!ms[m.key]?.done)
+            );
+            const lateCount = states.filter(s => s === 'late').length;
+            const hasWarn = states.some(s => s === 'warn');
+            const allNa = states.every(s => s === 'na');
+
+            let cls: string;
+            let text: string;
+            if (planifie || allNa) {
+              cls = 'bg-slate-100 text-slate-600 border-slate-200';
+              text = 'Jalons : non démarré';
+            } else if (lateCount > 0) {
+              cls = 'bg-red-100 text-red-700 border-red-200';
+              text = `Jalons : ${lateCount} en retard`;
+            } else if (hasWarn) {
+              cls = 'bg-orange-100 text-orange-700 border-orange-200';
+              text = 'Jalons : échéance proche';
+            } else {
+              cls = 'bg-green-100 text-green-700 border-green-200';
+              text = 'Jalons : à jour';
+            }
+            return (
+              <div className={cn('mb-6 px-4 py-2.5 rounded-md border text-sm font-semibold', cls)}>
+                {text}
+              </div>
+            );
+          })()}
+
           {/* SECTION 1: IDENTIFICATION */}
           <div className="mb-8">
             <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Identification & Dates</h3>
@@ -339,9 +465,10 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 />
               </FormGroup>
               <FormGroup label="Type de Produit">
-                <select value={localBatch.fluxKey} onChange={e => handleChange('fluxKey', e.target.value)} className="form-input">
-                  {Object.entries(fluxConfig).map(([k, v]: [string, FluxConfig]) => (
-                    <option key={k} value={k}>{v.name}</option>
+                <select value={selectedCatalogType} onChange={e => handleCatalogTypeChange(e.target.value)} className="form-input">
+                  <option value="">-- Sélectionner un type --</option>
+                  {productCatalog.map(p => (
+                    <option key={p.type} value={p.type}>{p.type}</option>
                   ))}
                 </select>
               </FormGroup>
@@ -397,26 +524,108 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             </div>
           </div>
 
+          {/* SECTION JALONS DE PRODUCTION */}
+          <div className="mb-8">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Jalons de production</h3>
+            {(() => {
+              const flux = fluxConfig[localBatch.fluxKey];
+              const dates = computeMilestoneDates(flux, localBatch.startDate);
+              const ms = localBatch.milestones || defaultMilestones();
+              const planifie = localBatch.process_stage === 'PLANIFIE';
+              return (
+                <div className="flex flex-col gap-3">
+                  {PRODUCTION_MILESTONES.map(m => {
+                    const datePrevue = dates[m.key];
+                    const check = ms[m.key] || { done: false };
+                    const state = planifie ? 'na' : milestoneStatus(datePrevue, !!check.done);
+                    return (
+                      <div key={m.key} className="grid grid-cols-12 items-center gap-3 border border-slate-200 rounded-lg px-4 py-3 bg-white">
+                        <div className="col-span-4 text-sm font-medium text-slate-700">{m.label}</div>
+                        <div className="col-span-4">
+                          <span className={cn(
+                            'inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold border',
+                            MILESTONE_STATUS_COLOR[state]
+                          )}>
+                            {datePrevue ? `Prévu : ${datePrevue}` : 'Date non calculée'}
+                          </span>
+                        </div>
+                        <div className="col-span-2 flex items-center">
+                          <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={!!check.done}
+                              disabled={!canEdit}
+                              onChange={e => handleMilestoneDone(m.key, e.target.checked)}
+                              className="rounded border-slate-300"
+                            />
+                            Fait
+                          </label>
+                        </div>
+                        <div className="col-span-2">
+                          {check.done && (
+                            <input
+                              type="date"
+                              value={check.doneDate || ''}
+                              disabled={!canEdit}
+                              onChange={e => handleMilestoneDate(m.key, e.target.value)}
+                              className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none"
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+
           {/* SECTION 2: DONNÉES PRODUCTION */}
           <div className="mb-8">
             <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Données de Production</h3>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <FormGroup label="Contenant">
+                <input
+                  type="text"
+                  value={catalogEntry?.contenant || '—'}
+                  disabled
+                  className="form-input bg-slate-100 text-slate-500 cursor-not-allowed"
+                />
+              </FormGroup>
+              <FormGroup label="Conditionnement (par boîte)">
+                <input
+                  type="text"
+                  value={catalogEntry ? String(catalogEntry.condit) : '—'}
+                  disabled
+                  className="form-input bg-slate-100 text-slate-500 cursor-not-allowed"
+                />
+              </FormGroup>
+              <FormGroup label="Volume contenant (mL)">
+                <input
+                  type="text"
+                  value={catalogEntry ? String(catalogEntry.volume) : '—'}
+                  disabled
+                  className="form-input bg-slate-100 text-slate-500 cursor-not-allowed"
+                />
+              </FormGroup>
+            </div>
             <div className="grid grid-cols-2 gap-4">
               <FormGroup label="Volume Lot (L)">
                 <input type="number" value={localBatch.volume} onChange={e => handleChange('volume', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
-              <FormGroup label="Boites Attendues">
+              <FormGroup label="Boîtes cible">
                 <input type="number" value={localBatch.boxesTarget} onChange={e => handleChange('boxesTarget', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
               <FormGroup label="Quantité Répartie">
                 <input type="number" value={localBatch.distributed} onChange={e => handleChange('distributed', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
-              <FormGroup label="Miré Conforme">
+              <FormGroup label="Quantité Mirés Conforme">
                 <input type="number" value={localBatch.conform} onChange={e => handleChange('conform', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
-              <FormGroup label="Vendu (Boîtes)">
+              <FormGroup label="Boîtes produites">
                 <input type="number" value={localBatch.sold} onChange={e => handleChange('sold', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
-              <FormGroup label="Palettes">
+              <FormGroup label="Palettes à expédier">
                 <input type="number" value={localBatch.palettes} onChange={e => handleChange('palettes', parseFloat(e.target.value) || 0)} className="form-input" />
               </FormGroup>
             </div>
@@ -560,8 +769,9 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 const testLabel = testDef?.label || s.type;
                 const recNotDone = s.status === 'A_ENVOYER';
                 const resNotDone = !['RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'].includes(s.status);
-                // Production démarrée = date de début de fab renseignée et déjà passée (sinon badges neutres)
-                const prodStarted = !!localBatch.startDate && localBatch.startDate <= new Date().toISOString().slice(0, 10);
+                // Production démarrée = pas planifié, date de début de fab renseignée et déjà passée (sinon badges neutres)
+                const prodStarted = localBatch.process_stage !== 'PLANIFIE'
+                  && !!localBatch.startDate && localBatch.startDate <= new Date().toISOString().slice(0, 10);
                 const stepIdx = sampleStepperIndex(s.status);
                 const histCount = (s.history || []).length;
 

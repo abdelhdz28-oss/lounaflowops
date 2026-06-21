@@ -9,8 +9,8 @@ interface SidebarProps {
 }
 
 const navItems = [
-  { id: 'dashboard', label: 'Tableau de bord', icon: LayoutDashboard, adminOnly: false },
-  { id: 'planning', label: 'Planning', icon: CalendarDays, adminOnly: false },
+  { id: 'dashboard', label: 'Tracking Production', icon: LayoutDashboard, adminOnly: false },
+  { id: 'planning', label: 'Planning de Fabrication', icon: CalendarDays, adminOnly: false },
   { id: 'quality', label: 'Qualité', icon: TestTube2, adminOnly: false },
   { id: 'deliveries', label: 'Livraisons', icon: Truck, adminOnly: false },
   { id: 'data', label: 'Data Historique', icon: Database, adminOnly: false },

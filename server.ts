@@ -110,8 +110,8 @@ const DEFAULT_CLIENTS = ['DERMACITY', 'ETERNA GLOW', 'DERMABAY', 'FARMAS UA'];
 const DEFAULT_STATUSES = ['UPCOMING', 'ON_TRACK', 'AT_RISK', 'COMPLETED'];
 
 // --- Refonte du suivi des lots : 3 axes orthogonaux ---
-type ProcessStage = 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
-type QualityStatus = 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
+type ProcessStage = 'PLANIFIE' | 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
+type QualityStatus = 'NOT_STARTED' | 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
 type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
 type SampleStatus = 'A_ENVOYER' | 'ENVOYE' | 'RESULTATS_RECUS' | 'CONFORME' | 'NON_CONFORME';
 
@@ -145,6 +145,27 @@ const STATUS_AFTER_ENVOI: SampleStatus[] = ['ENVOYE', 'RESULTATS_RECUS', 'CONFOR
 
 // Partenaires / laboratoires sélectionnables pour les tests. Éditable via Réglages.
 const DEFAULT_SAMPLE_PARTNERS = ['Intertek', 'Charles River'];
+
+// Catalogue produits configurable (réglage 'productCatalog'). Éditable via Réglages.
+const DEFAULT_PRODUCT_CATALOG = [
+  { type: 'HYDRAGEL A1 DM', name: 'INNOVYAL LIGHTENING ACTION', ref: 'DB-ILA', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A1 COS', name: 'INNOVYAL LIGHTENING ACTION', ref: 'DB-ILA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 DM', name: 'INNOVYAL REGENERATIVE ACTION', ref: 'DB-IRA', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 COS', name: 'INNOVYAL REGENERATIVE ACTION', ref: 'DB-IRA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A3 COS', name: 'INNOVYAL HAIR ACTION', ref: 'DB-IHA-C', condit: 3, contenant: 'FLACON', volume: 3.3 },
+  { type: 'STIM', name: 'HYDROXYAL', ref: 'DF-STIM0', condit: 1, contenant: 'SERINGUE', volume: 1.5 },
+  { type: 'STIM +', name: 'HYDROXYAL +', ref: 'DF-STIM1', condit: 1, contenant: 'SERINGUE', volume: 1.5 },
+  { type: 'EXOSOME', name: 'EXOVYAL', ref: 'EXOSOME X1', condit: 1, contenant: 'FLACON', volume: 3.3 },
+  { type: 'HYDRAGEL A2 SYRINGE', name: 'INNOVYAL REGENERATIVE ACTION -LIFT', ref: 'DB-IRA-S', condit: 2, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR1-LOUNA FILLERS', name: 'INSTANT REFINE', ref: 'DF-HAR1-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR2-LOUNA FILLERS', name: 'SHAPE & VOLUME', ref: 'DF-HAR2-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR2L-LOUNA FILLERS', name: 'GLOSSY LIPS', ref: 'DF-HAR2-L-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR3-LOUNA FILLERS', name: 'MAXI LIFT', ref: 'DF-HAR3-2U', condit: 2, contenant: 'SERINGUE', volume: 1.1 },
+  { type: 'HAR1-ESSENTYAL', name: 'TOUCH', ref: 'DF-HAR1-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR2-ESSENTYAL', name: 'VOLUME', ref: 'DF-HAR2-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR2L-ESSENTYAL', name: 'LIPS', ref: 'DF-HAR2-L-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 },
+  { type: 'HAR3-ESSENTYAL', name: 'EXTREME', ref: 'DF-HAR3-1U', condit: 1, contenant: 'SERINGUE', volume: 2.1 }
+];
 
 // Partenaire par défaut par test (pour la migration des samples existants).
 const SAMPLE_DEFAULT_PARTNER: Record<string, string> = {
@@ -180,6 +201,7 @@ function computeScheduleHealth(
 
 // Valide la cohérence inter-axes. Retourne un message d'erreur FR ou null si OK.
 function validateAxes(process_stage: string | undefined, quality_status: string | undefined): string | null {
+  // PLANIFIE (étape la plus précoce, avant FORMULATION) et NOT_STARTED : aucune contrainte spéciale.
   if (quality_status === 'LIBERE' && process_stage !== 'LIBERATION' && process_stage !== 'EXPEDIE') {
     return 'Le statut qualité « Libéré » nécessite une étape process « Libération » ou « Expédié ».';
   }
@@ -362,6 +384,7 @@ async function initDatabase() {
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sold INTEGER DEFAULT 0");
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS palettes INTEGER DEFAULT 0");
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS samples JSONB DEFAULT '[]'::jsonb");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS milestones JSONB DEFAULT '{}'::jsonb");
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
 
     // Refonte 3 axes : nouvelles colonnes (schedule_health n'est PAS stocké, calculé à la volée)
@@ -431,6 +454,14 @@ async function initDatabase() {
       await client.query(
         "INSERT INTO settings (key, value) VALUES ('samplePartners', $1)",
         [JSON.stringify(DEFAULT_SAMPLE_PARTNERS)]
+      );
+    }
+
+    const productCatalogResult = await client.query("SELECT value FROM settings WHERE key = 'productCatalog'");
+    if (productCatalogResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO settings (key, value) VALUES ('productCatalog', $1)",
+        [JSON.stringify(DEFAULT_PRODUCT_CATALOG)]
       );
     }
 
@@ -633,6 +664,23 @@ async function initDatabase() {
           [JSON.stringify(cfg)]
         );
       }
+    }
+
+    // --- Migration idempotente : jalons de production (3 jalons) ---
+    const batchesForMilestones = await client.query("SELECT id, milestones FROM batches");
+    for (const row of batchesForMilestones.rows) {
+      const m = typeof row.milestones === 'string' ? JSON.parse(row.milestones) : (row.milestones || {});
+      const hasAll = m && m.CONDI_PRIM && m.CONDI_SEC && m.LIBERATION;
+      if (hasAll) continue;
+      const init = {
+        CONDI_PRIM: m?.CONDI_PRIM || { done: false },
+        CONDI_SEC: m?.CONDI_SEC || { done: false },
+        LIBERATION: m?.LIBERATION || { done: false }
+      };
+      await client.query(
+        'UPDATE batches SET milestones = $1::jsonb WHERE id = $2',
+        [JSON.stringify(init), row.id]
+      );
     }
 
     await client.query('COMMIT');
@@ -928,7 +976,17 @@ function mapBatchFromDb(row: any): any {
     conform: row.conform,
     sold: row.sold,
     palettes: row.palettes,
-    samples: typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || [])
+    samples: typeof row.samples === 'string' ? JSON.parse(row.samples) : (row.samples || []),
+    milestones: mapMilestones(row.milestones)
+  };
+}
+
+function mapMilestones(raw: any): any {
+  const m = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+  return {
+    CONDI_PRIM: m?.CONDI_PRIM || { done: false },
+    CONDI_SEC: m?.CONDI_SEC || { done: false },
+    LIBERATION: m?.LIBERATION || { done: false }
   };
 }
 
@@ -1109,8 +1167,8 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
           id, fluxKey, reference, client, product, stepIndex, status,
           process_stage, quality_status,
           progress, startDate, endDate, deliveryDate, notes, volume,
-          boxesTarget, distributed, conform, sold, palettes, samples
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+          boxesTarget, distributed, conform, sold, palettes, samples, milestones
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         RETURNING *`,
         [
           batch.id, batch.fluxKey, batch.reference, batch.client, batch.product,
@@ -1118,7 +1176,8 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
           batch.progress, batch.startDate, batch.endDate,
           batch.deliveryDate, batch.notes, batch.volume, batch.boxesTarget,
           batch.distributed, batch.conform, batch.sold, batch.palettes,
-          JSON.stringify(batch.samples || [])
+          JSON.stringify(batch.samples || []),
+          JSON.stringify(batch.milestones || { CONDI_PRIM: { done: false }, CONDI_SEC: { done: false }, LIBERATION: { done: false } })
         ]
       );
       
@@ -1157,7 +1216,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
       'id', 'fluxKey', 'reference', 'client', 'product', 'stepIndex', 'status',
       'process_stage', 'quality_status',
       'progress', 'startDate', 'endDate', 'deliveryDate', 'notes', 'volume',
-      'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples'
+      'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples', 'milestones'
     ];
 
     const client = await pool.connect();
@@ -1214,7 +1273,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
 
       for (const [key, value] of Object.entries(updates)) {
         if (allowedFields.includes(key)) {
-          if (key === 'samples') {
+          if (key === 'samples' || key === 'milestones') {
             fields.push(`${key} = $${paramIndex++}::jsonb`);
             values.push(JSON.stringify(value));
           } else {
@@ -1525,6 +1584,33 @@ app.put('/api/settings/samplePartners', authenticateToken, requireRole('admin'),
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating samplePartners:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/settings/productCatalog', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'productCatalog'");
+    const productCatalog = result.rows.length > 0 ? result.rows[0].value : DEFAULT_PRODUCT_CATALOG;
+    res.json(productCatalog);
+  } catch (error) {
+    console.error('Error fetching productCatalog:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings/productCatalog', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const productCatalog = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('productCatalog', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [JSON.stringify(productCatalog)]
+    );
+    broadcast('settings:updated', { key: 'productCatalog', productCatalog });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating productCatalog:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });

@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
-import { Batch } from '../types';
-import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeSampleMilestones, MilestoneState } from '../constants';
+import { Batch, FluxConfig } from '../types';
+import {
+  PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeSampleMilestones, MilestoneState,
+  PRODUCTION_MILESTONES, computeMilestoneDates, milestoneStatus, defaultMilestones
+} from '../constants';
 import { PackageCheck, Send, FileCheck, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 const PROCESS_STAGE_LABELS: Record<string, string> = Object.fromEntries(PROCESS_STAGES.map(s => [s.value, s.label]));
@@ -38,6 +41,42 @@ function SampleMilestonesIcons({ batch }: { batch: Batch }) {
   );
 }
 
+// Couleur d'une pastille de jalon de production selon le statut.
+const MILESTONE_DOT_COLOR: Record<MilestoneState, string> = {
+  ok: 'bg-green-500',
+  warn: 'bg-orange-500',
+  late: 'bg-red-500',
+  na: 'bg-slate-300'
+};
+
+// 3 pastilles (Condi. Primaire / Secondaire / Libération) pour un lot, avec tooltip.
+function ProductionMilestonesDots({ batch, flux }: { batch: Batch; flux: FluxConfig | undefined }) {
+  const dates = computeMilestoneDates(flux, batch.startDate);
+  const ms = batch.milestones || defaultMilestones();
+  const planifie = batch.process_stage === 'PLANIFIE';
+  const STATE_LABEL: Record<MilestoneState, string> = {
+    ok: 'à jour', warn: 'échéance proche', late: 'en retard', na: 'non démarré'
+  };
+  const items = PRODUCTION_MILESTONES.map(m => {
+    const datePrevue = dates[m.key];
+    const done = !!ms[m.key]?.done;
+    const state: MilestoneState = planifie ? 'na' : milestoneStatus(datePrevue, done);
+    const detail = done ? 'validé' : (datePrevue ? `prévu ${datePrevue} (${STATE_LABEL[state]})` : 'date non calculée');
+    return { label: m.label, state, title: `${m.label} : ${detail}` };
+  });
+  return (
+    <span className="inline-flex items-center gap-1 flex-shrink-0">
+      {items.map((it, i) => (
+        <span
+          key={i}
+          title={it.title}
+          className={cn('w-2.5 h-2.5 rounded-full', MILESTONE_DOT_COLOR[it.state], it.state === 'late' && 'animate-pulse')}
+        />
+      ))}
+    </span>
+  );
+}
+
 interface DashboardViewProps {
   onOpenBatch: (id: string) => void;
 }
@@ -45,7 +84,7 @@ interface DashboardViewProps {
 type SortableColumn = 'id' | 'product' | 'client' | 'step' | 'startDate' | 'endDate' | 'deliveryDate' | 'quality' | 'health' | 'progress';
 
 export function DashboardView({ onOpenBatch }: DashboardViewProps) {
-  const { batches } = useAppContext();
+  const { batches, fluxConfig } = useAppContext();
 
   // Defensive guard: Ensure batches is an array
   const batchList = Array.isArray(batches) ? batches : [];
@@ -227,7 +266,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
           <table className="w-full text-left border-collapse min-w-[1000px]">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200">
-                {renderHeader('Lot', 'id', 'w-32')}
+                {renderHeader('Lot', 'id', 'min-w-[8rem] whitespace-nowrap')}
                 {renderHeader('Produit (Réf)', 'product')}
                 {renderHeader('Client', 'client', 'w-40')}
                 {renderHeader('Étape', 'step', 'w-40')}
@@ -236,6 +275,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 {renderHeader('Livraison Souhaitée', 'deliveryDate', 'w-36')}
                 {renderHeader('Statut qualité', 'quality', 'w-32')}
                 {renderHeader('OTD', 'health', 'w-28')}
+                <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Jalons</th>
                 {renderHeader('Progression', 'progress', 'w-32')}
                 <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Action</th>
               </tr>
@@ -333,6 +373,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                     ))}
                   </select>
                 </th>
+                <th className="py-2 px-3" />
                 <th className="py-2 px-3">
                   <input
                     type="text"
@@ -369,8 +410,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                       className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors"
                     >
                       <td className="py-3 px-4 font-bold text-blue-600">
-                        <div className="flex items-center gap-1.5">
-                          <span>{b.id}</span>
+                        <div className="flex items-center gap-1.5 whitespace-nowrap">
+                          <span className="whitespace-nowrap">{b.id}</span>
                           <SampleMilestonesIcons batch={b} />
                         </div>
                       </td>
@@ -395,6 +436,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                           {health?.label || b.schedule_health || ''}
                         </span>
                       </td>
+                      <td className="py-3 px-4 text-center">
+                        <ProductionMilestonesDots batch={b} flux={fluxConfig[b.fluxKey]} />
+                      </td>
                       <td className="py-3 px-4">
                         <div className="w-24 h-1.5 bg-slate-200 rounded-full overflow-hidden">
                           <div 
@@ -417,7 +461,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 })
               ) : (
                 <tr>
-                  <td colSpan={11} className="py-8 text-center text-sm text-slate-400">
+                  <td colSpan={12} className="py-8 text-center text-sm text-slate-400">
                     Aucun lot ne correspond aux filtres actuels.
                   </td>
                 </tr>
