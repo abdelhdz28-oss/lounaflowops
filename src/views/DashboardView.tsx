@@ -77,6 +77,19 @@ function ProductionMilestonesDots({ batch, flux }: { batch: Batch; flux: FluxCon
   );
 }
 
+// Couleur d'urgence d'une date (Fin Fab. / Livraison Souhaitée) : vert >14j, orange 7-14j, rouge ≤7j ou dépassée.
+function dateUrgencyClass(dateStr: string | undefined): string {
+  if (!dateStr) return '';
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return '';
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysUntil = Math.floor((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysUntil < 0 || daysUntil <= 7) return 'text-red-600 font-semibold';
+  if (daysUntil <= 14) return 'text-orange-600 font-semibold';
+  return 'text-green-600 font-semibold';
+}
+
 interface DashboardViewProps {
   onOpenBatch: (id: string) => void;
 }
@@ -84,7 +97,7 @@ interface DashboardViewProps {
 type SortableColumn = 'id' | 'product' | 'client' | 'step' | 'startDate' | 'endDate' | 'deliveryDate' | 'quality' | 'health' | 'progress';
 
 export function DashboardView({ onOpenBatch }: DashboardViewProps) {
-  const { batches, fluxConfig } = useAppContext();
+  const { batches, fluxConfig, productCatalog } = useAppContext();
 
   // Defensive guard: Ensure batches is an array
   const batchList = Array.isArray(batches) ? batches : [];
@@ -267,7 +280,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200">
                 {renderHeader('Lot', 'id', 'min-w-[8rem] whitespace-nowrap')}
-                {renderHeader('Produit (Réf)', 'product')}
+                {renderHeader('Type de produit', 'product')}
                 {renderHeader('Client', 'client', 'w-40')}
                 {renderHeader('Étape', 'step', 'w-40')}
                 {renderHeader('Début Fab.', 'startDate', 'w-36')}
@@ -277,7 +290,6 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 {renderHeader('OTD', 'health', 'w-28')}
                 <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Jalons</th>
                 {renderHeader('Progression', 'progress', 'w-32')}
-                <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Action</th>
               </tr>
               <tr className="bg-slate-50/50 border-b border-slate-200">
                 <th className="py-2 px-3">
@@ -373,19 +385,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                     ))}
                   </select>
                 </th>
-                <th className="py-2 px-3" />
-                <th className="py-2 px-3">
-                  <input
-                    type="text"
-                    value={filterProgress}
-                    onChange={e => setFilterProgress(e.target.value)} 
-                    placeholder="Filtrer..."
-                    className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                  />
-                </th>
                 <th className="py-2 px-3 text-center">
                   {hasActiveFilters && (
-                    <button 
+                    <button
                       onClick={handleResetFilters}
                       className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
                       title="Réinitialiser les filtres"
@@ -393,6 +395,15 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                       <X className="w-4 h-4 mx-auto" />
                     </button>
                   )}
+                </th>
+                <th className="py-2 px-3">
+                  <input
+                    type="text"
+                    value={filterProgress}
+                    onChange={e => setFilterProgress(e.target.value)}
+                    placeholder="Filtrer..."
+                    className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-700 font-normal outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
                 </th>
               </tr>
             </thead>
@@ -416,16 +427,13 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-slate-800">{b.product || ''}</span>
-                          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-mono">{b.reference || ''}</span>
-                        </div>
+                        <span className="font-medium text-slate-800">{productCatalog.find(p => p.ref === b.reference)?.type || b.product || '—'}</span>
                       </td>
                       <td className="py-3 px-4 text-slate-600">{b.client || ''}</td>
                       <td className="py-3 px-4 text-slate-600">{step}</td>
                       <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.startDate || '-'}</td>
-                      <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.endDate || '-'}</td>
-                      <td className="py-3 px-4 text-slate-600 font-mono text-xs">{b.deliveryDate || '-'}</td>
+                      <td className={cn("py-3 px-4 font-mono text-xs", dateUrgencyClass(b.endDate) || 'text-slate-600')}>{b.endDate || '-'}</td>
+                      <td className={cn("py-3 px-4 font-mono text-xs", dateUrgencyClass(b.deliveryDate) || 'text-slate-600')}>{b.deliveryDate || '-'}</td>
                       <td className="py-3 px-4">
                         <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border", quality?.color || 'bg-slate-100 text-slate-700 border-slate-200')}>
                           {quality?.label || b.quality_status || ''}
@@ -448,20 +456,12 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                         </div>
                         <div className="text-xs text-slate-500 mt-1">{(b.progress !== undefined && b.progress !== null) ? b.progress : 0}%</div>
                       </td>
-                      <td className="py-3 px-4 text-center" onClick={e => e.stopPropagation()}>
-                        <button 
-                          onClick={() => onOpenBatch(b.id)}
-                          className="text-sm font-medium text-slate-600 hover:text-blue-600 px-3 py-1 border border-slate-200 rounded hover:bg-white transition-colors"
-                        >
-                          Voir
-                        </button>
-                      </td>
                     </tr>
                   );
                 })
               ) : (
                 <tr>
-                  <td colSpan={12} className="py-8 text-center text-sm text-slate-400">
+                  <td colSpan={11} className="py-8 text-center text-sm text-slate-400">
                     Aucun lot ne correspond aux filtres actuels.
                   </td>
                 </tr>
