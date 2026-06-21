@@ -70,17 +70,20 @@ export function computeScheduleHealth(
   deliveryDate: string | undefined,
   process_stage: import('./types').ProcessStage | undefined
 ): import('./types').ScheduleHealth {
-  if (!endDate || !deliveryDate) return 'ON_TRACK';
-  const end = new Date(endDate);
+  if (!deliveryDate) return 'ON_TRACK';
   const delivery = new Date(deliveryDate);
-  if (isNaN(end.getTime()) || isNaN(delivery.getTime())) return 'ON_TRACK';
+  if (isNaN(delivery.getTime())) return 'ON_TRACK';
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  if (end > delivery || (today > delivery && process_stage !== 'EXPEDIE')) {
-    return 'EN_RETARD';
-  }
+  // Livraison souhaitée déjà passée et lot non expédié → en retard (même si Fin Fab inconnue)
+  if (today > delivery && process_stage !== 'EXPEDIE') return 'EN_RETARD';
+  if (!endDate) return 'ON_TRACK';
+  const end = new Date(endDate);
+  if (isNaN(end.getTime())) return 'ON_TRACK';
+  if (end > delivery) return 'EN_RETARD';
+
   const marginDays = Math.round((delivery.getTime() - end.getTime()) / (1000 * 60 * 60 * 24));
   if (marginDays >= SCHEDULE_MARGIN_DAYS) return 'ON_TRACK';
   return 'AT_RISK';
@@ -105,7 +108,7 @@ export function deliveryStatusFromBatch(batch: import('./types').Batch | undefin
 
 // --- Suivi Échantillons (tests labo) : 3 tests + 2 dates calculées ---
 
-import type { SampleStatus, SampleConfig, ProcessStage, Sample, FluxConfig } from './types';
+import type { SampleStatus, SampleConfig, ProcessStage, Sample, FluxConfig, Batch } from './types';
 
 export const SAMPLE_DUE_SOON_DAYS = 7;
 
@@ -247,10 +250,13 @@ export function computeTestsOk(samples: Sample[]): boolean {
 
 // Badge couleur pour une date d'échéance échantillon.
 // notDone = true si le statut n'a pas encore atteint l'étape attendue (rouge si dépassé).
-export function sampleDateBadgeColor(dateStr: string, notDone: boolean): string {
-  if (!dateStr) return 'bg-slate-100 text-slate-500 border-slate-200';
+export function sampleDateBadgeColor(dateStr: string, notDone: boolean, productionStarted: boolean = true): string {
+  const neutral = 'bg-slate-100 text-slate-500 border-slate-200';
+  if (!dateStr) return neutral;
   const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return 'bg-slate-100 text-slate-500 border-slate-200';
+  if (isNaN(d.getTime())) return neutral;
+  // Tant que la production n'a pas commencé : pas de couleur (ni vert/orange/rouge), juste neutre.
+  if (!productionStarted) return neutral;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const diffDays = Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
@@ -303,6 +309,122 @@ export function computeSampleDelays(samples: Sample[] | undefined): SampleDelay[
     }
   }
   return result;
+}
+
+// --- Pictogrammes de jalons échantillons (Dashboard) ---
+// Statut par étape : ok (vert) / warn (orange) / late (rouge) / na (gris).
+export type MilestoneState = 'ok' | 'warn' | 'late' | 'na';
+
+export interface SampleMilestones {
+  reception: MilestoneState;
+  envoi: MilestoneState;
+  resultats: MilestoneState;
+  details: { reception: string; envoi: string; resultats: string }; // lignes pour tooltip
+}
+
+const MILESTONE_RANK: Record<MilestoneState, number> = { na: 0, ok: 1, warn: 2, late: 3 };
+
+function worseMilestone(a: MilestoneState, b: MilestoneState): MilestoneState {
+  return MILESTONE_RANK[b] > MILESTONE_RANK[a] ? b : a;
+}
+
+// Différence en jours entre une date ISO (yyyy-mm-dd) et aujourd'hui (>0 = futur).
+function daysFromToday(dateStr: string | undefined): number | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+// Calcule le statut agrégé du lot pour les 3 étapes (réception / envoi / résultats),
+// statut le plus grave parmi les tests applicables. Détails formatés pour tooltip.
+export function computeSampleMilestones(batch: Batch | undefined): SampleMilestones {
+  const samples = Array.isArray(batch?.samples) ? batch!.samples : [];
+  const applicables = samples.filter(s => s && s.applicable);
+
+  let reception: MilestoneState = 'na';
+  let envoi: MilestoneState = 'na';
+  let resultats: MilestoneState = 'na';
+  const recLines: string[] = [];
+  const envLines: string[] = [];
+  const resLines: string[] = [];
+
+  for (const s of applicables) {
+    const testLabel = SAMPLE_TESTS.find(t => t.key === s.type)?.label || s.type;
+    const recTheo = daysFromToday(s.dateReceptionEchantillon);
+    const resDue = daysFromToday(s.dateResultatsAttendue);
+    const envoye = !!s.dateEnvoi;
+    const recu = !!s.datePrelevementReel;
+    const resultatsRecus = !!s.dateResultatsRecus;
+
+    // --- RÉCEPTION (échantillon reçu en interne) ---
+    let recState: MilestoneState;
+    if (recu || (recTheo !== null && recTheo > SAMPLE_DUE_SOON_DAYS)) {
+      recState = 'ok';
+    } else if (recTheo !== null && recTheo < 0) {
+      recState = 'late';
+    } else if (recTheo !== null && recTheo >= 0 && recTheo <= SAMPLE_DUE_SOON_DAYS) {
+      recState = 'warn';
+    } else {
+      recState = 'ok';
+    }
+    reception = worseMilestone(reception, recState);
+    recLines.push(`${testLabel} : ${recu ? 'échantillon reçu' :
+      recState === 'late' ? `réception en retard (théorique ${s.dateReceptionEchantillon})` :
+      recState === 'warn' ? `réception proche (théorique ${s.dateReceptionEchantillon})` :
+      'dans les temps'}`);
+
+    // --- ENVOI (envoyé au labo) ---
+    let envState: MilestoneState;
+    if (envoye || (recTheo !== null && recTheo > SAMPLE_DUE_SOON_DAYS)) {
+      envState = 'ok';
+    } else if (recTheo !== null && recTheo < 0) {
+      envState = 'late';
+    } else if (recTheo !== null && recTheo >= 0 && recTheo <= SAMPLE_DUE_SOON_DAYS) {
+      envState = 'warn';
+    } else {
+      envState = 'ok';
+    }
+    envoi = worseMilestone(envoi, envState);
+    envLines.push(`${testLabel} : ${envoye ? 'envoyé au labo' :
+      envState === 'late' ? `envoi en retard (échéance ${s.dateReceptionEchantillon})` :
+      envState === 'warn' ? `envoi proche (échéance ${s.dateReceptionEchantillon})` :
+      'dans les temps'}`);
+
+    // --- RÉSULTATS (résultats reçus) ---
+    let resState: MilestoneState;
+    if (!envoye || s.status === 'A_ENVOYER') {
+      resState = 'na'; // étape pas encore concernée
+    } else if (resultatsRecus || (resDue !== null && resDue > SAMPLE_DUE_SOON_DAYS)) {
+      resState = 'ok';
+    } else if (resDue !== null && resDue < 0) {
+      resState = 'late';
+    } else if (resDue !== null && resDue >= 0 && resDue <= SAMPLE_DUE_SOON_DAYS) {
+      resState = 'warn';
+    } else {
+      resState = 'ok';
+    }
+    resultats = worseMilestone(resultats, resState);
+    if (resState !== 'na') {
+      resLines.push(`${testLabel} : ${resultatsRecus ? 'résultats reçus' :
+        resState === 'late' ? `résultats en retard (attendus ${s.dateResultatsAttendue})` :
+        resState === 'warn' ? `résultats proches (attendus ${s.dateResultatsAttendue})` :
+        'dans les temps'}`);
+    }
+  }
+
+  return {
+    reception,
+    envoi,
+    resultats,
+    details: {
+      reception: recLines.length ? 'Réception échantillon\n' + recLines.map(l => '• ' + l).join('\n') : 'Réception échantillon : aucun test applicable',
+      envoi: envLines.length ? 'Envoi au labo\n' + envLines.map(l => '• ' + l).join('\n') : 'Envoi au labo : aucun test applicable',
+      resultats: resLines.length ? 'Résultats\n' + resLines.map(l => '• ' + l).join('\n') : 'Résultats : étape non concernée'
+    }
+  };
 }
 
 export const PRODUCT_CATALOG = [

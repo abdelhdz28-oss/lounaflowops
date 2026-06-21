@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { X, TestTube2, Plus, RotateCcw, ExternalLink, AlertTriangle } from 'lucide-react';
+import { X, TestTube2, Plus, RotateCcw, AlertTriangle } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
 import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus, SampleStatus } from '../types';
 import {
-  PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH,
+  PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeScheduleHealth,
   SAMPLE_TESTS, SAMPLE_STATUSES,
   computeSampleDates, computeTestsOk, sampleDateBadgeColor, isSampleTransitionAllowed
 } from '../constants';
@@ -397,7 +397,43 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             </div>
           </div>
 
-          {/* SECTION 2: SUIVI 3 AXES (Étape process / Statut qualité / Santé délai) */}
+          {/* SECTION 2: DONNÉES PRODUCTION */}
+          <div className="mb-8">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Données de Production</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <FormGroup label="Volume Lot (L)">
+                <input type="number" value={localBatch.volume} onChange={e => handleChange('volume', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+              <FormGroup label="Boites Attendues">
+                <input type="number" value={localBatch.boxesTarget} onChange={e => handleChange('boxesTarget', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+              <FormGroup label="Quantité Répartie">
+                <input type="number" value={localBatch.distributed} onChange={e => handleChange('distributed', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+              <FormGroup label="Miré Conforme">
+                <input type="number" value={localBatch.conform} onChange={e => handleChange('conform', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+              <FormGroup label="Vendu (Boîtes)">
+                <input type="number" value={localBatch.sold} onChange={e => handleChange('sold', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+              <FormGroup label="Palettes">
+                <input type="number" value={localBatch.palettes} onChange={e => handleChange('palettes', parseFloat(e.target.value) || 0)} className="form-input" />
+              </FormGroup>
+            </div>
+          </div>
+
+          {/* SECTION 3: NOTES */}
+          <div className="mb-8">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Notes & Observations</h3>
+            <textarea
+              rows={3}
+              value={localBatch.notes}
+              onChange={e => handleChange('notes', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-y"
+            />
+          </div>
+
+          {/* SECTION 4: SUIVI 3 AXES (Étape process / Statut qualité / Santé délai) */}
           <div className="mb-8">
             <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Suivi du Lot</h3>
             <div className="grid grid-cols-3 gap-4">
@@ -444,13 +480,14 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
               {/* Axe 3 : OTD (calculé, lecture seule) */}
               <FormGroup label="OTD (On-Time Delivery)">
                 {(() => {
-                  const sh = SCHEDULE_HEALTH.find(s => s.value === localBatch.schedule_health);
+                  const computed = computeScheduleHealth(localBatch.endDate, localBatch.deliveryDate, localBatch.process_stage);
+                  const sh = SCHEDULE_HEALTH.find(s => s.value === computed);
                   return (
                     <span className={cn(
                       "inline-flex items-center justify-center px-2.5 py-2 rounded-md text-sm font-semibold border",
                       sh?.color || 'bg-slate-100 text-slate-500 border-slate-200'
                     )}>
-                      {sh?.label || localBatch.schedule_health || '—'}
+                      {sh?.label || computed || '—'}
                     </span>
                   );
                 })()}
@@ -507,11 +544,14 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             </div>
 
             {/* Légende couleurs (affichée une seule fois) */}
-            <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600 mb-4">
-              <span className="font-semibold text-slate-500">Dates calculées :</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> à venir</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-orange-500" /> échéance ≤ 7 j</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> en retard</span>
+            <div className="mb-4">
+              <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
+                <span className="font-semibold text-slate-500">Pastilles des dates calculées —</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Dans les temps</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-orange-500" /> Échéance proche (≤ 7 j)</span>
+                <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> En retard (action requise)</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">La pastille indique si l'échéance de la date est dépassée.</p>
             </div>
 
             <div className="flex flex-col gap-4">
@@ -520,6 +560,8 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 const testLabel = testDef?.label || s.type;
                 const recNotDone = s.status === 'A_ENVOYER';
                 const resNotDone = !['RESULTATS_RECUS', 'CONFORME', 'NON_CONFORME'].includes(s.status);
+                // Production démarrée = date de début de fab renseignée et déjà passée (sinon badges neutres)
+                const prodStarted = !!localBatch.startDate && localBatch.startDate <= new Date().toISOString().slice(0, 10);
                 const stepIdx = sampleStepperIndex(s.status);
                 const histCount = (s.history || []).length;
 
@@ -639,7 +681,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                           />
                         </FieldLabel>
 
-                        <FieldLabel label="Date de prélèvement réelle (optionnel)">
+                        <FieldLabel label="Date de réception échantillon">
                           <input
                             type="date"
                             value={s.datePrelevementReel || ''}
@@ -655,33 +697,6 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                             onChange={e => handleSampleChange(idx, 'dateResultatsRecus', e.target.value)}
                             className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
                           />
-                        </FieldLabel>
-
-                        <FieldLabel label="N° de rapport labo">
-                          <input
-                            type="text"
-                            value={s.rapportRef || ''}
-                            onChange={e => handleSampleChange(idx, 'rapportRef', e.target.value)}
-                            placeholder="Réf. rapport"
-                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
-                          />
-                        </FieldLabel>
-
-                        <FieldLabel label="Lien certificat (URL)">
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="url"
-                              value={s.rapportUrl || ''}
-                              onChange={e => handleSampleChange(idx, 'rapportUrl', e.target.value)}
-                              placeholder="https://…"
-                              className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-blue-500 outline-none bg-white"
-                            />
-                            {s.rapportUrl && (
-                              <a href={s.rapportUrl} target="_blank" rel="noopener noreferrer" title="Ouvrir le certificat" className="shrink-0 text-blue-600 hover:text-blue-800">
-                                <ExternalLink className="w-4 h-4" />
-                              </a>
-                            )}
-                          </div>
                         </FieldLabel>
 
                         {s.status === 'NON_CONFORME' && (
@@ -722,13 +737,13 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                         <div className="grid grid-cols-2 gap-2">
                           <span className={cn(
                             "text-[11px] px-2 py-1 rounded border text-center leading-tight",
-                            sampleDateBadgeColor(s.dateReceptionEchantillon, recNotDone)
+                            sampleDateBadgeColor(s.dateReceptionEchantillon, recNotDone, prodStarted)
                           )}>
                             Réception théorique : {s.dateReceptionEchantillon || '—'}
                           </span>
                           <span className={cn(
                             "text-[11px] px-2 py-1 rounded border text-center leading-tight",
-                            sampleDateBadgeColor(s.dateResultatsAttendue, resNotDone)
+                            sampleDateBadgeColor(s.dateResultatsAttendue, resNotDone, prodStarted)
                           )}>
                             Résultats attendus : {s.dateResultatsAttendue || '—'}
                             {s.status === 'A_ENVOYER' && s.dateResultatsAttendue ? ' (prévisionnel)' : ''}
@@ -758,42 +773,6 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 );
               })}
             </div>
-          </div>
-
-          {/* SECTION 4: DONNÉES PRODUCTION */}
-          <div className="mb-8">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Données de Production</h3>
-            <div className="grid grid-cols-2 gap-4">
-              <FormGroup label="Volume Lot (L)">
-                <input type="number" value={localBatch.volume} onChange={e => handleChange('volume', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-              <FormGroup label="Boites Attendues">
-                <input type="number" value={localBatch.boxesTarget} onChange={e => handleChange('boxesTarget', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-              <FormGroup label="Quantité Répartie">
-                <input type="number" value={localBatch.distributed} onChange={e => handleChange('distributed', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-              <FormGroup label="Miré Conforme">
-                <input type="number" value={localBatch.conform} onChange={e => handleChange('conform', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-              <FormGroup label="Vendu (Boîtes)">
-                <input type="number" value={localBatch.sold} onChange={e => handleChange('sold', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-              <FormGroup label="Palettes">
-                <input type="number" value={localBatch.palettes} onChange={e => handleChange('palettes', parseFloat(e.target.value) || 0)} className="form-input" />
-              </FormGroup>
-            </div>
-          </div>
-
-          {/* NOTES */}
-          <div className="mb-8">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Notes & Observations</h3>
-            <textarea 
-              rows={3} 
-              value={localBatch.notes} 
-              onChange={e => handleChange('notes', e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-y"
-            />
           </div>
 
         </div>

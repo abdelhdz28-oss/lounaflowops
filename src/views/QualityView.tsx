@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Search, AlertTriangle } from 'lucide-react';
+import React from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { SAMPLE_TESTS, computeSampleDelays } from '../constants';
@@ -15,15 +15,8 @@ interface QualityViewProps {
 
 export function QualityView({ onOpenBatch }: QualityViewProps) {
   const { batches } = useAppContext();
-  const [search, setSearch] = useState('');
 
-  const q = search.toLowerCase();
-  const filteredBatches = batches.filter(b =>
-    (b.id || '').toLowerCase().includes(q) ||
-    (b.product || '').toLowerCase().includes(q)
-  );
-
-  // Agrégat de tous les lots × tests applicables en retard (toutes les recherches confondues).
+  // Agrégat de tous les lots × tests applicables en retard.
   const overdueRows = batches.flatMap(b =>
     computeSampleDelays(b.samples).map(d => ({
       batchId: b.id,
@@ -82,18 +75,8 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
         )}
       </div>
 
-      <div className="flex justify-between items-center mb-6">
+      <div className="mb-6">
         <h3 className="text-lg font-semibold text-slate-800">Suivi des Échantillons & Contrôles</h3>
-        <div className="relative w-72">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Rechercher un numéro de lot..."
-            className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
-          />
-        </div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
@@ -104,15 +87,13 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Produit (Réf)</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Suivi Échantillons</th>
               <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Taux de Rejet</th>
-              <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Statut</th>
             </tr>
           </thead>
           <tbody>
-            {filteredBatches.map((b) => {
-              let rate = 0;
-              if (b.distributed > 0) {
-                rate = ((b.distributed - b.conform) / b.distributed) * 100;
-              }
+            {batches.map((b) => {
+              // Pas de calcul tant que Quantité répartie ET Miré conforme ne sont pas saisis → « — »
+              const hasData = b.distributed > 0 && b.conform > 0;
+              const rate = hasData ? ((b.distributed - b.conform) / b.distributed) * 100 : 0;
 
               return (
                 <tr 
@@ -147,10 +128,9 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
                       })}
                     </div>
                   </td>
-                  <td className={cn("py-3 px-4 font-bold", rate > 5 ? "text-red-600" : "text-slate-700")}>
-                    {rate.toFixed(2)}%
+                  <td className={cn("py-3 px-4 font-bold", hasData && rate > 5 ? "text-red-600" : "text-slate-700")}>
+                    {hasData ? `${rate.toFixed(2)}%` : '—'}
                   </td>
-                  <td className="py-3 px-4 text-sm text-slate-600">{b.status}</td>
                 </tr>
               );
             })}

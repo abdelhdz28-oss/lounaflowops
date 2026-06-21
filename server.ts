@@ -159,17 +159,20 @@ function computeScheduleHealth(
   deliveryDate: string | null | undefined,
   process_stage: string | null | undefined
 ): ScheduleHealth {
-  if (!endDate || !deliveryDate) return 'ON_TRACK';
-  const end = new Date(endDate);
+  if (!deliveryDate) return 'ON_TRACK';
   const delivery = new Date(deliveryDate);
-  if (isNaN(end.getTime()) || isNaN(delivery.getTime())) return 'ON_TRACK';
+  if (isNaN(delivery.getTime())) return 'ON_TRACK';
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  if (end > delivery || (today > delivery && process_stage !== 'EXPEDIE')) {
-    return 'EN_RETARD';
-  }
+  // Livraison souhaitée déjà passée et lot non expédié → en retard (même si Fin Fab inconnue)
+  if (today > delivery && process_stage !== 'EXPEDIE') return 'EN_RETARD';
+  if (!endDate) return 'ON_TRACK';
+  const end = new Date(endDate);
+  if (isNaN(end.getTime())) return 'ON_TRACK';
+  if (end > delivery) return 'EN_RETARD';
+
   const marginDays = Math.round((delivery.getTime() - end.getTime()) / (1000 * 60 * 60 * 24));
   if (marginDays >= SCHEDULE_MARGIN_DAYS) return 'ON_TRACK';
   return 'AT_RISK';

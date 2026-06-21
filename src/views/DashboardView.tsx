@@ -2,34 +2,40 @@ import React, { useState } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { Batch } from '../types';
-import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, SAMPLE_TESTS, computeSampleDelays } from '../constants';
-import { AlertTriangle, X, ChevronUp, ChevronDown } from 'lucide-react';
+import { PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeSampleMilestones, MilestoneState } from '../constants';
+import { PackageCheck, Send, FileCheck, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 const PROCESS_STAGE_LABELS: Record<string, string> = Object.fromEntries(PROCESS_STAGES.map(s => [s.value, s.label]));
 const QUALITY_STATUS_MAP = Object.fromEntries(QUALITY_STATUSES.map(s => [s.value, s]));
 const SCHEDULE_HEALTH_MAP = Object.fromEntries(SCHEDULE_HEALTH.map(s => [s.value, s]));
 
-const DELAY_TYPE_LABELS: Record<string, string> = {
-  RECEPTION: 'Envoi/réception en retard',
-  RESULTATS: 'Résultats en retard'
+// Couleur du pictogramme de jalon selon le statut agrégé.
+const MILESTONE_COLOR: Record<MilestoneState, string> = {
+  ok: 'text-green-500',
+  warn: 'text-orange-500',
+  late: 'text-red-500',
+  na: 'text-slate-300'
 };
 
-// Construit un tooltip détaillé listant chaque test concerné + type de retard + date d'échéance.
-function getSampleAlertMessage(batch: Batch): string | null {
-  const delays = computeSampleDelays(batch?.samples);
-  if (delays.length === 0) return null;
-
-  const lines = delays.map(d => {
-    const testLabel = SAMPLE_TESTS.find(t => t.key === d.sample.type)?.label || d.sample.type;
-    const detail = d.type === 'RECEPTION'
-      ? `prélèvement non envoyé, réception théorique dépassée le ${d.dueDate}`
-      : `résultats attendus le ${d.dueDate}, non reçus`;
-    return `• ${testLabel} — ${DELAY_TYPE_LABELS[d.type]} (${detail}, ${d.daysLate} j de retard)`;
-  });
-
-  // Récapitulatif des types de retard présents pour ce lot
-  const types = Array.from(new Set(delays.map(d => DELAY_TYPE_LABELS[d.type])));
-  return `Alerte échantillons (${types.join(' + ')}) :\n` + lines.join('\n');
+// Groupe de 3 pictogrammes (réception / envoi / résultats) pour un lot.
+function SampleMilestonesIcons({ batch }: { batch: Batch }) {
+  const m = computeSampleMilestones(batch);
+  const items = [
+    { Icon: PackageCheck, state: m.reception, title: m.details.reception },
+    { Icon: Send, state: m.envoi, title: m.details.envoi },
+    { Icon: FileCheck, state: m.resultats, title: m.details.resultats }
+  ];
+  return (
+    <span className="inline-flex items-center gap-1 flex-shrink-0">
+      {items.map(({ Icon, state, title }, i) => (
+        <Icon
+          key={i}
+          className={cn('w-3.5 h-3.5', MILESTONE_COLOR[state], state === 'late' && 'animate-pulse')}
+          title={title}
+        />
+      ))}
+    </span>
+  );
 }
 
 interface DashboardViewProps {
@@ -365,15 +371,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                       <td className="py-3 px-4 font-bold text-blue-600">
                         <div className="flex items-center gap-1.5">
                           <span>{b.id}</span>
-                          {(() => {
-                            const alertMsg = getSampleAlertMessage(b);
-                            return alertMsg ? (
-                              <AlertTriangle 
-                                className="w-4 h-4 text-red-500 animate-pulse flex-shrink-0" 
-                                title={alertMsg}
-                              />
-                            ) : null;
-                          })()}
+                          <SampleMilestonesIcons batch={b} />
                         </div>
                       </td>
                       <td className="py-3 px-4">
