@@ -36,6 +36,9 @@ RUN npm install --omit=dev
 # Copier le build frontend depuis l'étape builder
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.ts ./
+# Données d'import initial du Cockpit opérationnel (semées en base au 1er démarrage si vide)
+COPY --from=builder /app/cockpit_seed.json ./
+COPY --from=builder /app/cogs_seed.json ./
 
 # Changer la propriété des fichiers
 RUN chown -R lounaflow:nodejs /app

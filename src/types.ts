@@ -1,6 +1,6 @@
 export type Step = string;
 
-export type ProcessStage = 'PLANIFIE' | 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'EXPEDIE';
+export type ProcessStage = 'PLANIFIE' | 'FORMULATION' | 'CONDI_PRIM' | 'CONDI_SEC' | 'LIBERATION' | 'ATTENTE_ENLEVEMENT' | 'EXPEDIE';
 export type QualityStatus = 'NOT_STARTED' | 'EN_COURS' | 'QUARANTAINE' | 'LIBERE' | 'REJETE';
 export type ScheduleHealth = 'ON_TRACK' | 'AT_RISK' | 'EN_RETARD';
 
@@ -34,6 +34,12 @@ export interface MilestoneCheck {
   doneDate?: string;
 }
 
+export interface NoteEntry {
+  user: string;
+  at: string;   // ISO datetime, stampé côté serveur
+  text: string;
+}
+
 export interface SampleConfig {
   mapping: Record<string, ProcessStage>;
   analysisLeadDays: Record<string, number>;
@@ -56,6 +62,7 @@ export interface Batch {
   endDate: string;
   deliveryDate?: string;
   notes: string;
+  noteEntries?: NoteEntry[];
   volume: number;
   boxesTarget: number;
   distributed: number;
@@ -64,6 +71,7 @@ export interface Batch {
   palettes: number;
   samples: Sample[];
   milestones?: { CONDI_PRIM: MilestoneCheck; CONDI_SEC: MilestoneCheck; LIBERATION: MilestoneCheck };
+  prepTasks?: Record<string, boolean>;
 }
 
 export interface Delivery {
@@ -79,6 +87,23 @@ export interface Delivery {
 export interface Product {
   name: string;
   ref: string;
+}
+
+export type ForecastStatus = 'EN_DISCUSSION' | 'CONFIRME' | 'CONVERTI';
+
+export interface Forecast {
+  id: string;
+  productType: string;   // type catalogue
+  product: string;       // nom (auto depuis catalogue)
+  reference: string;     // réf (auto depuis catalogue)
+  client: string;
+  plannedQuantity: number; // boîtes prévues
+  targetStart: string;   // date cible début (ISO yyyy-mm-dd)
+  targetEnd: string;     // date cible fin
+  status: ForecastStatus;
+  notes: string;
+  convertedBatchId?: string; // n° de lot une fois converti
+  createdAt?: string;
 }
 
 export interface ProductCatalogEntry {

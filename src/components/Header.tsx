@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Plus, LogOut, User, Shield, Edit3, Eye } from 'lucide-react';
+import { Download, Plus, LogOut, User, Shield, Edit3, Eye, Maximize2, Minimize2 } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
 import { exportCurrentView } from '../utils/export';
@@ -9,6 +9,8 @@ interface HeaderProps {
   title: string;
   currentView: string;
   onNewBatch: () => void;
+  presentation: boolean;
+  onTogglePresentation: () => void;
 }
 
 const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
@@ -17,7 +19,7 @@ const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: 
   viewer: { label: 'Lecture seule', icon: <Eye className="w-3 h-3" />, color: 'text-slate-600 bg-slate-50 border-slate-200' },
 };
 
-export function Header({ title, currentView, onNewBatch }: HeaderProps) {
+export function Header({ title, currentView, onNewBatch, presentation, onTogglePresentation }: HeaderProps) {
   const { batches, deliveries, fluxConfig } = useAppContext();
   const { user, logout, canEdit } = useAuth();
 
@@ -47,6 +49,15 @@ export function Header({ title, currentView, onNewBatch }: HeaderProps) {
             </div>
           </div>
         )}
+
+        <button
+          onClick={onTogglePresentation}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors"
+          title={presentation ? 'Quitter la présentation' : 'Mode présentation (plein écran)'}
+        >
+          {presentation ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          {presentation ? 'Quitter' : 'Présentation'}
+        </button>
 
         <button
           onClick={handleExport}

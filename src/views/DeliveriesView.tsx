@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Truck, Plus, Search, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
-import { DELIVERY_STATUSES, deliveryStatusFromBatch } from '../constants';
+import { DELIVERY_STATUSES, deliveryStatusFromBatch, formatDate } from '../constants';
 
 const DELIVERY_STATUS_MAP = Object.fromEntries(DELIVERY_STATUSES.map(s => [s.value, s]));
 
@@ -23,7 +23,7 @@ export function DeliveriesView() {
     (d.client || '').toLowerCase().includes(q)
   );
 
-  const STATUS_ORDER: Record<string, number> = { A_PLANIFIER: 0, EN_PRODUCTION: 1, PRET: 2, ENLEVE: 3 };
+  const STATUS_ORDER: Record<string, number> = { A_PLANIFIER: 0, EN_PRODUCTION: 1, EN_LIBERATION: 2, PRET: 3, ENLEVE: 4 };
   const sortVal = (d: typeof deliveries[number]): string | number => {
     switch (sortField) {
       case 'client': return (d.client || '').toLowerCase();
@@ -126,7 +126,7 @@ export function DeliveriesView() {
               </div>
               <div className="flex-1 grid grid-cols-6 gap-4 items-center text-sm text-slate-700">
                 <div className="font-medium text-slate-900">{d.client}</div>
-                <div>{d.date}</div>
+                <div>{formatDate(d.date)}</div>
                 <div className="font-mono font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded w-fit">{d.batchId}</div>
                 <div>{(d.boxesSold ?? 0).toLocaleString()} boîtes</div>
                 <div>{d.palettes ?? 0} Palette(s)</div>

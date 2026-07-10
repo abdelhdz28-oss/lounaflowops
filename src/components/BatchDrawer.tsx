@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, TestTube2, Plus, RotateCcw, AlertTriangle } from 'lucide-react';
+import { X, TestTube2, Plus, RotateCcw, AlertTriangle, Mail } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
 import { Batch, Sample, FluxConfig, ProcessStage, QualityStatus, SampleStatus } from '../types';
@@ -8,7 +8,7 @@ import {
   SAMPLE_TESTS, SAMPLE_STATUSES,
   computeSampleDates, computeTestsOk, sampleDateBadgeColor, isSampleTransitionAllowed,
   PRODUCTION_MILESTONES, computeMilestoneDates, milestoneStatus, MILESTONE_STATUS_COLOR,
-  defaultMilestones, ProductionMilestoneStage
+  defaultMilestones, ProductionMilestoneStage, formatDate
 } from '../constants';
 import { cn } from '../utils/cn';
 
@@ -53,6 +53,16 @@ function nextActionHint(s: Sample): string {
   }
 }
 
+// Formatte un ISO datetime en FR lisible : 21/06/2026 21:30
+function formatNoteDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString('fr-FR', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
 interface BatchDrawerProps {
   batchId: string | null;
   onClose: () => void;
@@ -60,12 +70,14 @@ interface BatchDrawerProps {
 
 export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
   const {
-    batches, fluxConfig, sampleConfig, catalog, productCatalog, updateBatch, createBatch, createDelivery,
-    clients, updateClients, samplePartners
+    batches, fluxConfig, sampleConfig, catalog, productCatalog, updateBatch, createBatch,
+    clients, updateClients, samplePartners, addBatchNote, deleteBatch
   } = useAppContext();
   const { isAdmin, canEdit } = useAuth();
   const [localBatch, setLocalBatch] = useState<Batch | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [newNote, setNewNote] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
 
   useEffect(() => {
     if (batchId) {
@@ -358,6 +370,18 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     }
   };
 
+  const handleAddNote = async () => {
+    if (!localBatch || !newNote.trim()) return;
+    setSavingNote(true);
+    const ok = await addBatchNote(localBatch.id, newNote.trim());
+    setSavingNote(false);
+    if (ok) {
+      setNewNote('');
+    } else {
+      alert("Erreur lors de l'ajout du commentaire. Vérifiez vos droits d'accès.");
+    }
+  };
+
   const handleSave = async () => {
     try {
       const stageIdx = Math.max(0, PROCESS_STAGES.findIndex(s => s.value === localBatch.process_stage));
@@ -374,21 +398,12 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
           alert("Erreur lors de la création du lot. Veuillez vérifier si l'identifiant de lot n'existe pas déjà ou si vos droits d'accès sont suffisants.");
           return;
         }
-        
-        if (localBatch.deliveryDate) {
-          await createDelivery({
-            batchId: localBatch.id,
-            client: localBatch.client || 'N/A',
-            date: localBatch.deliveryDate,
-            boxesSold: localBatch.boxesTarget || 0,
-            palettes: localBatch.palettes || 0,
-            status: 'PLANIFIÉ'
-          });
-        }
+        // La livraison est créée et synchronisée côté serveur (syncDeliveryForBatch) à partir de la date de livraison du lot —
+        // ne pas la créer aussi ici, sinon le lot reçoit deux lignes de livraison.
       } else {
-        const success = await updateBatch(batchId!, { ...localBatch, progress });
-        if (!success) {
-          alert("Erreur lors de la modification du lot. Veuillez vérifier vos droits d'accès.");
+        const res = await updateBatch(batchId!, { ...localBatch, progress });
+        if (!res.ok) {
+          alert(res.error || "Erreur lors de la modification du lot. Veuillez vérifier vos droits d'accès.");
           return;
         }
       }
@@ -396,6 +411,19 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
     } catch (err) {
       console.error(err);
       alert("Une erreur inattendue est survenue lors de l'enregistrement.");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (isNew || !batchId) return;
+    if (!window.confirm(
+      `Supprimer définitivement le lot ${localBatch.id} ?\nCette action est irréversible et retire aussi ses livraisons liées.`
+    )) return;
+    const success = await deleteBatch(batchId);
+    if (success) {
+      onClose();
+    } else {
+      alert("Erreur lors de la suppression du lot. Veuillez vérifier vos droits d'accès.");
     }
   };
 
@@ -546,7 +574,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                             'inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold border',
                             MILESTONE_STATUS_COLOR[state]
                           )}>
-                            {datePrevue ? `Prévu : ${datePrevue}` : 'Date non calculée'}
+                            {datePrevue ? `Prévu : ${formatDate(datePrevue)}` : 'Date non calculée'}
                           </span>
                         </div>
                         <div className="col-span-2 flex items-center">
@@ -631,15 +659,62 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
             </div>
           </div>
 
-          {/* SECTION 3: NOTES */}
+          {/* SECTION 3: NOTES & OBSERVATIONS — fil de commentaires horodaté */}
           <div className="mb-8">
             <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Notes & Observations</h3>
-            <textarea
-              rows={3}
-              value={localBatch.notes}
-              onChange={e => handleChange('notes', e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-y"
-            />
+            {(() => {
+              // Lecture du fil depuis le lot live (rafraîchi après ajout), fallback sur le clone local.
+              const liveBatch = batches.find(x => x.id === localBatch.id);
+              const entries = (liveBatch?.noteEntries ?? localBatch.noteEntries) || [];
+              const ordered = [...entries].reverse(); // plus récent en premier
+              const isNewBatch = localBatch.id.startsWith('NEW');
+              return (
+                <>
+                  {/* Fil de commentaires */}
+                  {ordered.length === 0 ? (
+                    <p className="text-sm text-slate-400 italic mb-4">Aucun commentaire pour l'instant.</p>
+                  ) : (
+                    <div className="flex flex-col gap-3 mb-4">
+                      {ordered.map((entry, i) => (
+                        <div key={i} className="border border-slate-200 rounded-lg px-4 py-3 bg-slate-50">
+                          <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
+                            <span className="font-bold text-slate-700">{entry.user}</span>
+                            <span className="text-slate-300">·</span>
+                            <span>{formatNoteDate(entry.at)}</span>
+                          </div>
+                          <p className="text-sm text-slate-700 whitespace-pre-wrap">{entry.text}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Zone d'ajout */}
+                  <div className="flex flex-col gap-2">
+                    <textarea
+                      rows={2}
+                      value={newNote}
+                      onChange={e => setNewNote(e.target.value)}
+                      disabled={isNewBatch || !canEdit}
+                      placeholder="Ajouter un commentaire…"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-y disabled:bg-slate-50 disabled:cursor-not-allowed"
+                    />
+                    {isNewBatch && (
+                      <p className="text-xs text-slate-400">Enregistrez d'abord le lot pour ajouter des commentaires.</p>
+                    )}
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={handleAddNote}
+                        disabled={isNewBatch || !canEdit || savingNote || !newNote.trim()}
+                        className="px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {savingNote ? 'Ajout…' : 'Ajouter le commentaire'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
 
           {/* SECTION 4: SUIVI 3 AXES (Étape process / Statut qualité / Santé délai) */}
@@ -655,7 +730,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                   className={cn("form-input", !canEdit && "bg-slate-50 cursor-not-allowed text-slate-500")}
                 >
                   {PROCESS_STAGES.map(ps => {
-                    const disabled = ps.value === 'EXPEDIE' && localBatch.quality_status !== 'LIBERE';
+                    const disabled = (ps.value === 'EXPEDIE' || ps.value === 'ATTENTE_ENLEVEMENT') && localBatch.quality_status !== 'LIBERE';
                     return (
                       <option key={ps.value} value={ps.value} disabled={disabled}>
                         {ps.label}{disabled ? ' (Requiert statut Libéré)' : ''}
@@ -676,6 +751,7 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                   {QUALITY_STATUSES.map(qs => {
                     const disabled = qs.value === 'LIBERE'
                       && localBatch.process_stage !== 'LIBERATION'
+                      && localBatch.process_stage !== 'ATTENTE_ENLEVEMENT'
                       && localBatch.process_stage !== 'EXPEDIE';
                     return (
                       <option key={qs.value} value={qs.value} disabled={disabled}>
@@ -725,6 +801,43 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                 );
               })}
             </div>
+
+            {/* Notification PRRC : étape Libération + qualité En cours → proposer d'alerter Farid (libération sous 5 j ouvrés). */}
+            {localBatch.process_stage === 'LIBERATION' && localBatch.quality_status === 'EN_COURS' && (
+              <div className="mt-4 flex items-center justify-between gap-3 px-3 py-3 bg-blue-50 border border-blue-200 rounded-md">
+                <span className="text-sm text-blue-800">Le lot est en <b>Libération</b> (qualité en cours). Notifie Farid que le DDL est prêt à libérer.</span>
+                <button
+                  onClick={() => {
+                    const type = productCatalog.find(p => p.ref === localBatch.reference)?.type || localBatch.product || '—';
+                    const subject = `Libération requise sous 5 jours ouvrés – Lot ${localBatch.id} (${type})`;
+                    const body =
+`Bonjour Farid,
+
+Le dossier de lot (DDL) du lot ci-dessous est désormais chargé dans le dossier OneDrive dédié. Merci de procéder à la libération du lot sous 5 jours ouvrés.
+
+Détails du lot :
+- Numéro de lot : ${localBatch.id}
+- Type de produit : ${type}
+- Nom du produit : ${localBatch.product || '—'}
+- Client : ${localBatch.client || '—'}
+- Référence : ${localBatch.reference || '—'}
+- Début de fabrication : ${localBatch.startDate || '—'}
+
+Le DDL est disponible dans le dossier OneDrive pour revue et validation. Merci de me confirmer la libération dans le délai imparti, ou de me signaler tout point bloquant.
+
+Bien cordialement,
+Abdel HADJAB
+Operation Director
+Louna Aesthetics SAS`;
+                    const url = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent('f.hadjab@louna-aesthetics.com')}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                    const w = window.open('', '_blank'); if (w) w.location.href = url; else window.open(url, '_blank');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 shrink-0"
+                >
+                  <Mail className="w-4 h-4" /> Notifier Farid — Libération sous 5 j
+                </button>
+              </div>
+            )}
 
             {/* Avertissement non bloquant : libération avec tests labo incomplets */}
             {localBatch.quality_status === 'LIBERE' && !computeTestsOk(localBatch.samples) && (
@@ -949,13 +1062,13 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
                             "text-[11px] px-2 py-1 rounded border text-center leading-tight",
                             sampleDateBadgeColor(s.dateReceptionEchantillon, recNotDone, prodStarted)
                           )}>
-                            Réception théorique : {s.dateReceptionEchantillon || '—'}
+                            Réception théorique : {formatDate(s.dateReceptionEchantillon, '—')}
                           </span>
                           <span className={cn(
                             "text-[11px] px-2 py-1 rounded border text-center leading-tight",
                             sampleDateBadgeColor(s.dateResultatsAttendue, resNotDone, prodStarted)
                           )}>
-                            Résultats attendus : {s.dateResultatsAttendue || '—'}
+                            Résultats attendus : {formatDate(s.dateResultatsAttendue, '—')}
                             {s.status === 'A_ENVOYER' && s.dateResultatsAttendue ? ' (prévisionnel)' : ''}
                           </span>
                         </div>
@@ -987,13 +1100,22 @@ export function BatchDrawer({ batchId, onClose }: BatchDrawerProps) {
 
         </div>
         
-        <div className="p-6 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors">
-            Annuler
-          </button>
-          <button onClick={handleSave} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors">
-            Enregistrer
-          </button>
+        <div className="p-6 border-t border-slate-200 bg-slate-50 flex justify-between items-center gap-3">
+          <div>
+            {isAdmin && !isNew && (
+              <button onClick={handleDelete} className="px-4 py-2 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-md hover:bg-red-50 transition-colors">
+                Supprimer ce lot
+              </button>
+            )}
+          </div>
+          <div className="flex gap-3">
+            <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors">
+              Annuler
+            </button>
+            <button onClick={handleSave} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors">
+              Enregistrer
+            </button>
+          </div>
         </div>
       </aside>
     </>

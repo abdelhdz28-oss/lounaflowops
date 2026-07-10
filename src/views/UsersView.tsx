@@ -11,8 +11,29 @@ interface UserData {
   id: string;
   username: string;
   role: UserRole;
+  permissions?: string[];
   created_at: string;
 }
+
+// Onglets attribuables par utilisateur (l'onglet « Utilisateurs » reste réservé admin).
+const ATTRIBUTABLE_VIEWS: { id: string; label: string }[] = [
+  { id: 'dashboard', label: 'Tracking Production' },
+  { id: 'kanban', label: 'Tracking Kanban' },
+  { id: 'prepprod', label: 'Préparation prod' },
+  { id: 'forecasts', label: 'Forecast Production' },
+  { id: 'ventes', label: 'Forecast Ventes' },
+  { id: 'quality', label: 'Qualité' },
+  { id: 'deliveries', label: 'Livraisons' },
+  { id: 'pl', label: 'Packing List & Factures' },
+  { id: 'opsreporting', label: 'Reporting Ops' },
+  { id: 'odooerp', label: 'Odoo / ERP' },
+  { id: 'coa', label: 'CoA Tracking' },
+  { id: 'qms', label: 'QMS (Qualité / Doc / NC-CAPA / Fournisseurs…)' },
+  { id: 'data', label: 'Data Historique' },
+  { id: 'audit', label: "Journal d'Audit" },
+  { id: 'settings', label: 'Paramètres' },
+];
+const ALL_VIEW_IDS = ATTRIBUTABLE_VIEWS.map(v => v.id);
 
 const roleInfo: Record<UserRole, { label: string; icon: React.ReactNode; color: string; bgColor: string }> = {
   admin: { label: 'Admin', icon: <Shield className="w-4 h-4" />, color: 'text-red-700', bgColor: 'bg-red-50 border-red-200' },
@@ -32,7 +53,14 @@ export function UsersView() {
   const [formUsername, setFormUsername] = useState('');
   const [formPassword, setFormPassword] = useState('');
   const [formRole, setFormRole] = useState<UserRole>('viewer');
+  const [formPermissions, setFormPermissions] = useState<string[]>(ALL_VIEW_IDS);
   const [formLoading, setFormLoading] = useState(false);
+
+  const togglePermission = (viewId: string) => {
+    setFormPermissions(prev =>
+      prev.includes(viewId) ? prev.filter(v => v !== viewId) : [...prev, viewId]
+    );
+  };
 
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
@@ -65,6 +93,7 @@ export function UsersView() {
     setFormUsername('');
     setFormPassword('');
     setFormRole('viewer');
+    setFormPermissions(ALL_VIEW_IDS); // tout coché par défaut
     setError('');
     setSuccess('');
     setShowModal(true);
@@ -75,6 +104,7 @@ export function UsersView() {
     setFormUsername(user.username);
     setFormPassword('');
     setFormRole(user.role);
+    setFormPermissions(user.permissions ?? ALL_VIEW_IDS);
     setError('');
     setSuccess('');
     setShowModal(true);
@@ -87,9 +117,15 @@ export function UsersView() {
 
     try {
       if (editingUser) {
-        const updates: Partial<{ password: string; role: UserRole }> = {};
+        const updates: Partial<{ password: string; role: UserRole; permissions: string[] }> = {};
         if (formPassword) updates.password = formPassword;
         if (formRole !== editingUser.role) updates.role = formRole;
+        // Les permissions ne concernent pas l'admin (accès total). Envoyer si elles ont changé.
+        const prevPerms = [...(editingUser.permissions ?? ALL_VIEW_IDS)].sort();
+        const nextPerms = [...formPermissions].sort();
+        if (formRole !== 'admin' && JSON.stringify(prevPerms) !== JSON.stringify(nextPerms)) {
+          updates.permissions = formPermissions;
+        }
 
         if (Object.keys(updates).length === 0) {
           setError('Aucune modification à enregistrer');
@@ -128,7 +164,8 @@ export function UsersView() {
           body: JSON.stringify({
             username: formUsername,
             password: formPassword,
-            role: formRole
+            role: formRole,
+            permissions: formRole === 'admin' ? ALL_VIEW_IDS : formPermissions
           })
         });
 
@@ -426,6 +463,32 @@ export function UsersView() {
                   <option value="admin">Admin - Tous les droits</option>
                 </select>
               </div>
+
+              {formRole !== 'admin' ? (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Onglets accessibles
+                  </label>
+                  <div className="grid grid-cols-2 gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                    {ATTRIBUTABLE_VIEWS.map(v => (
+                      <label key={v.id} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formPermissions.includes(v.id)}
+                          onChange={() => togglePermission(v.id)}
+                          className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        {v.label}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">Décochez un onglet pour le masquer à cet utilisateur.</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-3">
+                  Un administrateur a accès à tous les onglets.
+                </p>
+              )}
 
               <div className="flex justify-end gap-3 pt-2">
                 <button

@@ -1,0 +1,1226 @@
+{
+ "products": [
+  {
+   "code": "DB-ILA",
+   "family": "Hydragel",
+   "label": "Hydragel A1 (Lightening)",
+   "batchL": 48,
+   "volUnitMl": 3.3,
+   "density": 1,
+   "unitsPerBox": 3,
+   "yBulk": 0.98,
+   "yFill": 0.96,
+   "yVisual": 0.96,
+   "yPack": 1,
+   "refCogsUnit": 2.845,
+   "lines": [
+    {
+     "label": "HA",
+     "category": "Matières",
+     "qty": 534.521,
+     "unit": "g",
+     "unitPrice": 10.29
+    },
+    {
+     "label": "Tranexamic acid",
+     "category": "Matières",
+     "qty": 480,
+     "unit": "g",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Niacinamide",
+     "category": "Matières",
+     "qty": 720,
+     "unit": "g",
+     "unitPrice": 0.07
+    },
+    {
+     "label": "NaCl",
+     "category": "Matières",
+     "qty": 149.527,
+     "unit": "g",
+     "unitPrice": 0.045
+    },
+    {
+     "label": "Disodium hydrogen phosphate",
+     "category": "Matières",
+     "qty": 20.945,
+     "unit": "g",
+     "unitPrice": 0.081
+    },
+    {
+     "label": "Sodium dihydrogen phosphate",
+     "category": "Matières",
+     "qty": 2.109,
+     "unit": "g",
+     "unitPrice": 0.0658
+    },
+    {
+     "label": "HCl",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 31.9
+    },
+    {
+     "label": "NaOH",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 32.4
+    },
+    {
+     "label": "Water for Injection",
+     "category": "Matières",
+     "qty": 48,
+     "unit": "l",
+     "unitPrice": 4.45
+    },
+    {
+     "label": "Flacon",
+     "category": "Matières",
+     "qty": 13764,
+     "unit": "u",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Bouchon",
+     "category": "Matières",
+     "qty": 15000,
+     "unit": "u",
+     "unitPrice": 0.056
+    },
+    {
+     "label": "Capsule",
+     "category": "Matières",
+     "qty": 13684.36,
+     "unit": "u",
+     "unitPrice": 0.032
+    },
+    {
+     "label": "Etiquette Flacons",
+     "category": "Matières",
+     "qty": 13202.67,
+     "unit": "u",
+     "unitPrice": 0.0134
+    },
+    {
+     "label": "Etui",
+     "category": "Matières",
+     "qty": 4378.996,
+     "unit": "u",
+     "unitPrice": 1.32
+    },
+    {
+     "label": "Etiquette Etui",
+     "category": "Matières",
+     "qty": 4378.996,
+     "unit": "u",
+     "unitPrice": 0.00565
+    },
+    {
+     "label": "Notice",
+     "category": "Matières",
+     "qty": 4378.996,
+     "unit": "u",
+     "unitPrice": 0.065
+    },
+    {
+     "label": "Pastille inviolabilité",
+     "category": "Matières",
+     "qty": 4378.996,
+     "unit": "u",
+     "unitPrice": 0.006
+    },
+    {
+     "label": "Pipette pasteur",
+     "category": "Matières",
+     "qty": 40,
+     "unit": "u",
+     "unitPrice": 0.106
+    },
+    {
+     "label": "Unité de filtration",
+     "category": "Matières",
+     "qty": 7,
+     "unit": "u",
+     "unitPrice": 22.42
+    },
+    {
+     "label": "Pot PP 60ml",
+     "category": "Matières",
+     "qty": 30,
+     "unit": "u",
+     "unitPrice": 0.15
+    },
+    {
+     "label": "Paire gant stérile",
+     "category": "Matières",
+     "qty": 13,
+     "unit": "u",
+     "unitPrice": 0.5
+    },
+    {
+     "label": "Pot PP transparent 1L",
+     "category": "Matières",
+     "qty": 10,
+     "unit": "u",
+     "unitPrice": 2.09
+    },
+    {
+     "label": "Location salle 1,5J",
+     "category": "CMO",
+     "qty": 2.5,
+     "unit": "",
+     "unitPrice": 840
+    },
+    {
+     "label": "Stérilisation matériel",
+     "category": "CMO",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 320
+    },
+    {
+     "label": "Formulation",
+     "category": "CMO",
+     "qty": 3,
+     "unit": "",
+     "unitPrice": 350
+    },
+    {
+     "label": "Flacons conditionnés IPC/EPC",
+     "category": "CMO",
+     "qty": 38,
+     "unit": "",
+     "unitPrice": 0.8
+    },
+    {
+     "label": "Flacons conditionnés en boîte",
+     "category": "CMO",
+     "qty": 13202.67,
+     "unit": "",
+     "unitPrice": 1.24
+    },
+    {
+     "label": "Traitement lot par AQ",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 118.95
+    },
+    {
+     "label": "Envoi Chronopost",
+     "category": "CMO",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 36
+    },
+    {
+     "label": "HA concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 232
+    },
+    {
+     "label": "Tranexamic concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 294
+    },
+    {
+     "label": "Niacinamide concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 221
+    },
+    {
+     "label": "Endotoxines",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 156
+    },
+    {
+     "label": "Bioburden (IPC)",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 85
+    }
+   ]
+  },
+  {
+   "code": "DB-IRA",
+   "family": "Hydragel",
+   "label": "Hydragel A2 (Regenerative)",
+   "batchL": 48,
+   "volUnitMl": 3.3,
+   "density": 1,
+   "unitsPerBox": 3,
+   "yBulk": 0.98,
+   "yFill": 0.94,
+   "yVisual": 0.95,
+   "yPack": 1,
+   "refCogsUnit": 3.723,
+   "lines": [
+    {
+     "label": "HA",
+     "category": "Matières",
+     "qty": 267.261,
+     "unit": "g",
+     "unitPrice": 10.29
+    },
+    {
+     "label": "PDRN",
+     "category": "Matières",
+     "qty": 393.443,
+     "unit": "g",
+     "unitPrice": 35.0
+    },
+    {
+     "label": "Niacinamide",
+     "category": "Matières",
+     "qty": 720,
+     "unit": "g",
+     "unitPrice": 0.07
+    },
+    {
+     "label": "NaCl",
+     "category": "Matières",
+     "qty": 216,
+     "unit": "g",
+     "unitPrice": 0.045
+    },
+    {
+     "label": "Disodium hydrogen phosphate",
+     "category": "Matières",
+     "qty": 20.945,
+     "unit": "g",
+     "unitPrice": 0.081
+    },
+    {
+     "label": "Sodium dihydrogen phosphate",
+     "category": "Matières",
+     "qty": 2.109,
+     "unit": "g",
+     "unitPrice": 0.0658
+    },
+    {
+     "label": "HCl",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 31.9
+    },
+    {
+     "label": "NaOH",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 32.4
+    },
+    {
+     "label": "Water for Injection",
+     "category": "Matières",
+     "qty": 48,
+     "unit": "l",
+     "unitPrice": 4.45
+    },
+    {
+     "label": "Flacon",
+     "category": "Matières",
+     "qty": 13578,
+     "unit": "u",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Bouchon",
+     "category": "Matières",
+     "qty": 15000,
+     "unit": "u",
+     "unitPrice": 0.056
+    },
+    {
+     "label": "Capsule",
+     "category": "Matières",
+     "qty": 13399.27,
+     "unit": "u",
+     "unitPrice": 0.032
+    },
+    {
+     "label": "Etiquette Flacons",
+     "category": "Matières",
+     "qty": 12729.31,
+     "unit": "u",
+     "unitPrice": 0.0134
+    },
+    {
+     "label": "Etui",
+     "category": "Matières",
+     "qty": 4243.103,
+     "unit": "u",
+     "unitPrice": 1.32
+    },
+    {
+     "label": "Etiquette Etui",
+     "category": "Matières",
+     "qty": 4243.103,
+     "unit": "u",
+     "unitPrice": 0.00565
+    },
+    {
+     "label": "Notice",
+     "category": "Matières",
+     "qty": 4243.103,
+     "unit": "u",
+     "unitPrice": 0.065
+    },
+    {
+     "label": "Pastille inviolabilité",
+     "category": "Matières",
+     "qty": 4243.103,
+     "unit": "u",
+     "unitPrice": 0.006
+    },
+    {
+     "label": "Pipette pasteur",
+     "category": "Matières",
+     "qty": 40,
+     "unit": "u",
+     "unitPrice": 0.106
+    },
+    {
+     "label": "Unité de filtration",
+     "category": "Matières",
+     "qty": 7,
+     "unit": "u",
+     "unitPrice": 22.42
+    },
+    {
+     "label": "Pot PP 60ml",
+     "category": "Matières",
+     "qty": 30,
+     "unit": "u",
+     "unitPrice": 0.15
+    },
+    {
+     "label": "Paire gant stérile",
+     "category": "Matières",
+     "qty": 15,
+     "unit": "u",
+     "unitPrice": 0.5
+    },
+    {
+     "label": "Pot PP transparent 1L",
+     "category": "Matières",
+     "qty": 10,
+     "unit": "u",
+     "unitPrice": 2.09
+    },
+    {
+     "label": "Location salle 1,5J",
+     "category": "CMO",
+     "qty": 2.5,
+     "unit": "",
+     "unitPrice": 840
+    },
+    {
+     "label": "Stérilisation matériel",
+     "category": "CMO",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 320
+    },
+    {
+     "label": "Formulation",
+     "category": "CMO",
+     "qty": 2.5,
+     "unit": "",
+     "unitPrice": 350
+    },
+    {
+     "label": "Flacons conditionnés IPC/EPC",
+     "category": "CMO",
+     "qty": 38,
+     "unit": "",
+     "unitPrice": 0.8
+    },
+    {
+     "label": "Flacons conditionnés en boîte",
+     "category": "CMO",
+     "qty": 12729.31,
+     "unit": "",
+     "unitPrice": 1.24
+    },
+    {
+     "label": "Traitement lot par AQ",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 118.95
+    },
+    {
+     "label": "Envoi Chronopost",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 36
+    },
+    {
+     "label": "HA concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 232
+    },
+    {
+     "label": "PDRN concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 361.5
+    },
+    {
+     "label": "Niacinamide concentration",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 221
+    },
+    {
+     "label": "Endotoxines",
+     "category": "Analytique",
+     "qty": 2,
+     "unit": "",
+     "unitPrice": 180.8
+    },
+    {
+     "label": "Bioburden (IPC)",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 93
+    }
+   ]
+  },
+  {
+   "code": "DB-IHA",
+   "family": "Hydragel",
+   "label": "Hydragel A3 (Hair)",
+   "batchL": 24,
+   "volUnitMl": 3.3,
+   "density": 1,
+   "unitsPerBox": 3,
+   "yBulk": 0.98,
+   "yFill": 0.95,
+   "yVisual": 0.95,
+   "yPack": 1,
+   "refCogsUnit": 3.129,
+   "lines": [
+    {
+     "label": "HA",
+     "category": "Matières",
+     "qty": 133.63,
+     "unit": "g",
+     "unitPrice": 10.29
+    },
+    {
+     "label": "PDRN",
+     "category": "Matières",
+     "qty": 79.823,
+     "unit": "g",
+     "unitPrice": 35.0
+    },
+    {
+     "label": "Caffeine",
+     "category": "Matières",
+     "qty": 48,
+     "unit": "g",
+     "unitPrice": 0.12
+    },
+    {
+     "label": "Collagène",
+     "category": "Matières",
+     "qty": 24.819,
+     "unit": "g",
+     "unitPrice": 72.0
+    },
+    {
+     "label": "Polyglutamate",
+     "category": "Matières",
+     "qty": 126.984,
+     "unit": "g",
+     "unitPrice": 0.5
+    },
+    {
+     "label": "Niacinamide",
+     "category": "Matières",
+     "qty": 72,
+     "unit": "g",
+     "unitPrice": 0.06821
+    },
+    {
+     "label": "Glycerol",
+     "category": "Matières",
+     "qty": 120,
+     "unit": "g",
+     "unitPrice": 0.21
+    },
+    {
+     "label": "NaCl",
+     "category": "Matières",
+     "qty": 120,
+     "unit": "g",
+     "unitPrice": 0.045
+    },
+    {
+     "label": "Disodium hydrogen phosphate",
+     "category": "Matières",
+     "qty": 1.055,
+     "unit": "g",
+     "unitPrice": 0.081
+    },
+    {
+     "label": "Sodium dihydrogen phosphate",
+     "category": "Matières",
+     "qty": 6.691,
+     "unit": "g",
+     "unitPrice": 0.0658
+    },
+    {
+     "label": "HCl",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 31.9
+    },
+    {
+     "label": "NaOH",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 32.4
+    },
+    {
+     "label": "Water for Injection",
+     "category": "Matières",
+     "qty": 24,
+     "unit": "l",
+     "unitPrice": 4.45
+    },
+    {
+     "label": "Flacon",
+     "category": "Matières",
+     "qty": 6770.909,
+     "unit": "u",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Bouchon",
+     "category": "Matières",
+     "qty": 6770.909,
+     "unit": "u",
+     "unitPrice": 0.056
+    },
+    {
+     "label": "Capsule",
+     "category": "Matières",
+     "qty": 6770.909,
+     "unit": "u",
+     "unitPrice": 0.032
+    },
+    {
+     "label": "Etiquette Flacons",
+     "category": "Matières",
+     "qty": 6432.364,
+     "unit": "u",
+     "unitPrice": 0.078
+    },
+    {
+     "label": "Etui",
+     "category": "Matières",
+     "qty": 2144.121,
+     "unit": "u",
+     "unitPrice": 1.69
+    },
+    {
+     "label": "Etiquette Etui",
+     "category": "Matières",
+     "qty": 2144.121,
+     "unit": "u",
+     "unitPrice": 0.00565
+    },
+    {
+     "label": "Pastille inviolabilité",
+     "category": "Matières",
+     "qty": 2144.121,
+     "unit": "u",
+     "unitPrice": 0.006
+    },
+    {
+     "label": "Pipette pasteur",
+     "category": "Matières",
+     "qty": 40,
+     "unit": "u",
+     "unitPrice": 0.106
+    },
+    {
+     "label": "Unité de filtration",
+     "category": "Matières",
+     "qty": 5,
+     "unit": "u",
+     "unitPrice": 22.42
+    },
+    {
+     "label": "Pot PP 60ml",
+     "category": "Matières",
+     "qty": 30,
+     "unit": "u",
+     "unitPrice": 0.15
+    },
+    {
+     "label": "Paire gant stérile",
+     "category": "Matières",
+     "qty": 30,
+     "unit": "u",
+     "unitPrice": 0.5
+    },
+    {
+     "label": "Pot PP transparent 1L",
+     "category": "Matières",
+     "qty": 10,
+     "unit": "u",
+     "unitPrice": 2.09
+    },
+    {
+     "label": "Flacons conditionnés IPC/EPC",
+     "category": "CMO",
+     "qty": 5,
+     "unit": "",
+     "unitPrice": 0.8
+    },
+    {
+     "label": "Flacons conditionnés en boîte",
+     "category": "CMO",
+     "qty": 6432.364,
+     "unit": "",
+     "unitPrice": 1.24
+    },
+    {
+     "label": "Gestion article",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 25
+    },
+    {
+     "label": "Préparation DDL",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 35
+    },
+    {
+     "label": "Revue dossier de lot",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 118.95
+    },
+    {
+     "label": "Bioburden (IPC)",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 85
+    }
+   ]
+  },
+  {
+   "code": "DB-IRA-S",
+   "family": "Hydragel",
+   "label": "Hydragel A2 seringue (Regenerative)",
+   "batchL": 24,
+   "volUnitMl": 2,
+   "density": 1,
+   "unitsPerBox": 3,
+   "yBulk": 0.76,
+   "yFill": 0.8,
+   "yVisual": 0.84,
+   "yPack": 1,
+   "refCogsUnit": 4.693,
+   "frozen": true,
+   "lines": [
+    {
+     "label": "HA",
+     "category": "Matières",
+     "qty": 270,
+     "unit": "g",
+     "unitPrice": 10.2833
+    },
+    {
+     "label": "PDRN",
+     "category": "Matières",
+     "qty": 264,
+     "unit": "g",
+     "unitPrice": 35.0
+    },
+    {
+     "label": "Niacinamide",
+     "category": "Matières",
+     "qty": 396,
+     "unit": "g",
+     "unitPrice": 0.08
+    },
+    {
+     "label": "NaCl",
+     "category": "Matières",
+     "qty": 83,
+     "unit": "g",
+     "unitPrice": 0.0525
+    },
+    {
+     "label": "Disodium hydrogen phosphate",
+     "category": "Matières",
+     "qty": 1.21,
+     "unit": "g",
+     "unitPrice": 0.0525
+    },
+    {
+     "label": "Sodium dihydrogen phosphate",
+     "category": "Matières",
+     "qty": 12,
+     "unit": "g",
+     "unitPrice": 0.0525
+    },
+    {
+     "label": "HCl",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 47.5
+    },
+    {
+     "label": "NaOH",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 31.4
+    },
+    {
+     "label": "Water for Injection",
+     "category": "Matières",
+     "qty": 30,
+     "unit": "l",
+     "unitPrice": 3.6
+    },
+    {
+     "label": "Flacon",
+     "category": "Matières",
+     "qty": 7068,
+     "unit": "u",
+     "unitPrice": 0.21
+    },
+    {
+     "label": "Bouchon",
+     "category": "Matières",
+     "qty": 7500,
+     "unit": "u",
+     "unitPrice": 0.03
+    },
+    {
+     "label": "Capsule",
+     "category": "Matières",
+     "qty": 11000,
+     "unit": "u",
+     "unitPrice": 0.03
+    },
+    {
+     "label": "Etui",
+     "category": "Matières",
+     "qty": 2042.88,
+     "unit": "u",
+     "unitPrice": 1.85
+    },
+    {
+     "label": "Etiquette Flacons",
+     "category": "Matières",
+     "qty": 6128.64,
+     "unit": "u",
+     "unitPrice": 0.05
+    },
+    {
+     "label": "Etiquette Etui",
+     "category": "Matières",
+     "qty": 2042.88,
+     "unit": "u",
+     "unitPrice": 0.014
+    },
+    {
+     "label": "Etiquette Arabe",
+     "category": "Matières",
+     "qty": 2042.88,
+     "unit": "u",
+     "unitPrice": 0.02
+    },
+    {
+     "label": "Pastille inviolabilité",
+     "category": "Matières",
+     "qty": 2042.88,
+     "unit": "u",
+     "unitPrice": 0.015
+    },
+    {
+     "label": "Location salle 1,5J",
+     "category": "CMO",
+     "qty": 1.5,
+     "unit": "",
+     "unitPrice": 840
+    },
+    {
+     "label": "Préparation labo + matériel stérile",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 164.5
+    },
+    {
+     "label": "Répartition flacons + stérilisation",
+     "category": "CMO",
+     "qty": 7000,
+     "unit": "",
+     "unitPrice": 0.72
+    },
+    {
+     "label": "Contrôle visuel",
+     "category": "CMO",
+     "qty": 6525,
+     "unit": "",
+     "unitPrice": 0.15
+    },
+    {
+     "label": "Conditionnement secondaire",
+     "category": "CMO",
+     "qty": 6128.64,
+     "unit": "",
+     "unitPrice": 0.245
+    },
+    {
+     "label": "HA concentration",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 208
+    },
+    {
+     "label": "PDRN concentration",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 183
+    },
+    {
+     "label": "Niacinamide concentration",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 279
+    },
+    {
+     "label": "pH",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 75
+    },
+    {
+     "label": "Osmolarity",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 75
+    },
+    {
+     "label": "Stérilité",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 293
+    },
+    {
+     "label": "Endotoxines",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 150
+    },
+    {
+     "label": "Bioburden (IPC)",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 88
+    }
+   ]
+  },
+  {
+   "code": "HYDROXYAL",
+   "family": "Hydroxyal",
+   "label": "Hydroxyal",
+   "batchL": 14,
+   "volUnitMl": 1.5,
+   "density": 1.6,
+   "unitsPerBox": 1,
+   "yBulk": 0.95,
+   "yFill": 0.95,
+   "yVisual": 0.98,
+   "yPack": 1,
+   "refCogsUnit": 14.114,
+   "lines": [
+    {
+     "label": "Calcium Hydroxyapatite",
+     "category": "Matières",
+     "qty": 7840,
+     "unit": "g",
+     "unitPrice": 3.66
+    },
+    {
+     "label": "Sodium Carboxymethylcellulose",
+     "category": "Matières",
+     "qty": 306.667,
+     "unit": "g",
+     "unitPrice": 0.032
+    },
+    {
+     "label": "Glycerol",
+     "category": "Matières",
+     "qty": 1194.667,
+     "unit": "g",
+     "unitPrice": 0.025
+    },
+    {
+     "label": "Na2HPO4",
+     "category": "Matières",
+     "qty": 31.733,
+     "unit": "g",
+     "unitPrice": 0.08
+    },
+    {
+     "label": "NaH2PO4",
+     "category": "Matières",
+     "qty": 5.147,
+     "unit": "g",
+     "unitPrice": 0.07
+    },
+    {
+     "label": "NaOH 1N",
+     "category": "Matières",
+     "qty": 1,
+     "unit": "l",
+     "unitPrice": 35
+    },
+    {
+     "label": "Lidocaine (sec)",
+     "category": "Matières",
+     "qty": 64,
+     "unit": "g",
+     "unitPrice": 0.7
+    },
+    {
+     "label": "Eau ppi",
+     "category": "Matières",
+     "qty": 6.5975,
+     "unit": "l",
+     "unitPrice": 4.45
+    },
+    {
+     "label": "Seringue",
+     "category": "Matières",
+     "qty": 5264.583,
+     "unit": "u",
+     "unitPrice": 2.2
+    },
+    {
+     "label": "Piston seringue",
+     "category": "Matières",
+     "qty": 5264.583,
+     "unit": "u",
+     "unitPrice": 0.22
+    },
+    {
+     "label": "Etiquette seringues",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.032
+    },
+    {
+     "label": "Tige seringue",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.09
+    },
+    {
+     "label": "Backstop",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.09
+    },
+    {
+     "label": "Blister",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Opercule",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.2
+    },
+    {
+     "label": "Etui",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 1.0
+    },
+    {
+     "label": "Notice",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.11
+    },
+    {
+     "label": "Etiquette Etui",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.00565
+    },
+    {
+     "label": "Etiquette opercule",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.01
+    },
+    {
+     "label": "Pastille inviolabilité",
+     "category": "Matières",
+     "qty": 5159.292,
+     "unit": "u",
+     "unitPrice": 0.006
+    },
+    {
+     "label": "Pipette pasteur",
+     "category": "Matières",
+     "qty": 50,
+     "unit": "u",
+     "unitPrice": 0.106
+    },
+    {
+     "label": "Unité de filtration",
+     "category": "Matières",
+     "qty": 2,
+     "unit": "u",
+     "unitPrice": 22.42
+    },
+    {
+     "label": "Pot PP 60ml",
+     "category": "Matières",
+     "qty": 10,
+     "unit": "u",
+     "unitPrice": 0.15
+    },
+    {
+     "label": "Paire gant stérile",
+     "category": "Matières",
+     "qty": 50,
+     "unit": "u",
+     "unitPrice": 0.5
+    },
+    {
+     "label": "Pot PP transparent 1L",
+     "category": "Matières",
+     "qty": 5,
+     "unit": "u",
+     "unitPrice": 2.09
+    },
+    {
+     "label": "Location salle 1,5J",
+     "category": "CMO",
+     "qty": 3,
+     "unit": "",
+     "unitPrice": 840
+    },
+    {
+     "label": "Stérilisation matériel",
+     "category": "CMO",
+     "qty": 3,
+     "unit": "",
+     "unitPrice": 320
+    },
+    {
+     "label": "Seringues remplies test IPC/EC",
+     "category": "CMO",
+     "qty": 20,
+     "unit": "",
+     "unitPrice": 2.14
+    },
+    {
+     "label": "Seringues mirées non conformes",
+     "category": "CMO",
+     "qty": 84.233,
+     "unit": "",
+     "unitPrice": 1.74
+    },
+    {
+     "label": "Seringues conditionnées en boîte",
+     "category": "CMO",
+     "qty": 5159.292,
+     "unit": "",
+     "unitPrice": 3.54
+    },
+    {
+     "label": "Envoi Chronopost",
+     "category": "CMO",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 36
+    },
+    {
+     "label": "Endotoxines",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 158
+    },
+    {
+     "label": "Bioburden (IPC)",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 85
+    },
+    {
+     "label": "Dosage Lido",
+     "category": "Analytique",
+     "qty": 1,
+     "unit": "",
+     "unitPrice": 400
+    }
+   ]
+  }
+ ]
+}

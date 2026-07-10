@@ -45,6 +45,7 @@ export const PROCESS_STAGES: { value: import('./types').ProcessStage; label: str
   { value: 'CONDI_PRIM', label: 'Conditionnement primaire' },
   { value: 'CONDI_SEC', label: 'Conditionnement secondaire' },
   { value: 'LIBERATION', label: 'Libération' },
+  { value: 'ATTENTE_ENLEVEMENT', label: "Attente d'enlèvement" },
   { value: 'EXPEDIE', label: 'Expédié' }
 ];
 
@@ -61,7 +62,7 @@ export const QUALITY_STATUSES: { value: import('./types').QualityStatus; label: 
 export const SCHEDULE_HEALTH: { value: import('./types').ScheduleHealth; label: string; color: string }[] = [
   { value: 'ON_TRACK', label: 'On track', color: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
   { value: 'AT_RISK', label: 'At risk', color: 'bg-orange-100 text-orange-800 border-orange-200' },
-  { value: 'EN_RETARD', label: 'En retard', color: 'bg-red-100 text-red-800 border-red-200' }
+  { value: 'EN_RETARD', label: 'Delayed', color: 'bg-red-100 text-red-800 border-red-200' }
 ];
 
 export const SCHEDULE_MARGIN_DAYS = 7;
@@ -79,6 +80,11 @@ export function computeScheduleHealth(
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  // Lot planifié non démarré : pas d'alerte tant que la livraison souhaitée n'est pas dépassée
+  if (process_stage === 'PLANIFIE') {
+    return today > delivery ? 'EN_RETARD' : 'ON_TRACK';
+  }
+
   // Livraison souhaitée déjà passée et lot non expédié → en retard (même si Fin Fab inconnue)
   if (today > delivery && process_stage !== 'EXPEDIE') return 'EN_RETARD';
   if (!endDate) return 'ON_TRACK';
@@ -95,6 +101,7 @@ export function computeScheduleHealth(
 export const DELIVERY_STATUSES: { value: string; label: string; color: string }[] = [
   { value: 'A_PLANIFIER', label: 'À planifier', color: 'bg-slate-100 text-slate-800 border-slate-200' },
   { value: 'EN_PRODUCTION', label: 'En cours de production', color: 'bg-blue-100 text-blue-800 border-blue-200' },
+  { value: 'EN_LIBERATION', label: 'En cours de libération', color: 'bg-amber-100 text-amber-800 border-amber-200' },
   { value: 'PRET', label: 'Prêt à être enlevé', color: 'bg-orange-100 text-orange-800 border-orange-200' },
   { value: 'ENLEVE', label: 'Enlevé', color: 'bg-emerald-200 text-emerald-900 border-emerald-300' }
 ];
@@ -104,8 +111,51 @@ export function deliveryStatusFromBatch(batch: import('./types').Batch | undefin
   if (!batch) return 'A_PLANIFIER';
   if (batch.process_stage === 'EXPEDIE') return 'ENLEVE';
   if (batch.quality_status === 'LIBERE') return 'PRET';
+  // Lot en quarantaine = revue qualité en cours → libération en cours
+  if (batch.quality_status === 'QUARANTAINE') return 'EN_LIBERATION';
   if (batch.process_stage === 'PLANIFIE' || batch.process_stage === 'FORMULATION') return 'A_PLANIFIER';
   return 'EN_PRODUCTION';
+}
+
+// Formate une date ISO (YYYY-MM-DD) en JJ-MM-AA pour l'affichage. Renvoie `fallback` si vide/invalide.
+export function formatDate(iso: string | undefined | null, fallback = '-'): string {
+  if (!iso) return fallback;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso));
+  if (!m) return fallback;
+  const [, y, mo, d] = m;
+  return `${d}-${mo}-${y.slice(2)}`;
+}
+
+// --- Préparation prod : checklist documentaire par lot ---
+// daysBefore = nombre de jours avant la Début Fabrication où la tâche est attendue.
+export interface PrepTask { id: string; label: string; short: string; daysBefore: number; }
+
+export const PREP_TASKS: PrepTask[] = [
+  { id: 'bon_cmd_client', label: 'Bon de commande client', short: 'Bon cmd client', daysBefore: 14 },
+  { id: 'bc_cmo', label: 'BC CMO', short: 'BC CMO', daysBefore: 14 },
+  { id: 'bc_sylexia', label: 'BC Sylexia', short: 'BC Sylexia', daysBefore: 14 },
+  { id: 'bc_ipc_epc', label: 'BC IPC/EPC', short: 'BC IPC/EPC', daysBefore: 14 },
+  { id: 'ddl_of', label: 'DDL + OF', short: 'DDL + OF', daysBefore: 7 },
+  { id: 'maj_stock_odoo', label: 'MAJ stock Odoo', short: 'MAJ stock Odoo', daysBefore: 7 },
+  { id: 'scan_ddl', label: 'Scan DDL (attente libé.)', short: 'Scan DDL', daysBefore: 7 },
+];
+
+export type PrepStatus = 'done' | 'overdue' | 'soon' | 'pending' | 'na';
+
+// Statut d'une case : faite (vert), en retard (rouge), échéance proche ≤7j (orange), à venir (gris), ou non calculable.
+export function prepTaskStatus(done: boolean, startDate: string | undefined, daysBefore: number): PrepStatus {
+  if (done) return 'done';
+  if (!startDate) return 'na';
+  const start = new Date(startDate);
+  if (isNaN(start.getTime())) return 'na';
+  const deadline = new Date(start);
+  deadline.setDate(deadline.getDate() - daysBefore);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysToDeadline = Math.floor((deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysToDeadline < 0) return 'overdue';
+  if (daysToDeadline <= 7) return 'soon';
+  return 'pending';
 }
 
 // --- Suivi Échantillons (tests labo) : 3 tests + 2 dates calculées ---
@@ -516,7 +566,14 @@ export function defaultMilestones(): { CONDI_PRIM: MilestoneCheck; CONDI_SEC: Mi
   return { CONDI_PRIM: { done: false }, CONDI_SEC: { done: false }, LIBERATION: { done: false } };
 }
 
-import type { ProductCatalogEntry, MilestoneCheck } from './types';
+import type { ProductCatalogEntry, MilestoneCheck, ForecastStatus } from './types';
+
+// Statuts d'un forecast (production prévue, pas encore un n° de lot).
+export const FORECAST_STATUSES: { value: ForecastStatus; label: string; color: string }[] = [
+  { value: 'EN_DISCUSSION', label: 'En discussion', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+  { value: 'CONFIRME', label: 'Confirmé', color: 'bg-green-100 text-green-700 border-green-200' },
+  { value: 'CONVERTI', label: 'Converti en lot', color: 'bg-slate-100 text-slate-500 border-slate-200' }
+];
 
 // Catalogue produits configurable (réglage 'productCatalog'). Source unique pour
 // l'auto-remplissage des fiches lot et le calcul du rendement de production.

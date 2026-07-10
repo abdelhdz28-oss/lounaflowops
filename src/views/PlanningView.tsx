@@ -171,12 +171,15 @@ export function PlanningView({ onOpenBatch }: PlanningViewProps) {
                   </button>
                 </div>
 
-                {b.notes && (
-                  <div className="mt-4 pt-4 border-t border-slate-100 flex items-start gap-2">
-                    <FileText className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-                    <p className="text-sm text-slate-600 whitespace-pre-wrap">{b.notes}</p>
-                  </div>
-                )}
+                {(() => {
+                  const lastNote = b.noteEntries?.length ? b.noteEntries[b.noteEntries.length - 1].text : b.notes;
+                  return lastNote ? (
+                    <div className="mt-4 pt-4 border-t border-slate-100 flex items-start gap-2">
+                      <FileText className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                      <p className="text-sm text-slate-600 whitespace-pre-wrap">{lastNote}</p>
+                    </div>
+                  ) : null;
+                })()}
               </div>
               );
         })}

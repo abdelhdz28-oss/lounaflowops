@@ -9,6 +9,7 @@ interface User {
   id: string;
   username: string;
   role: UserRole;
+  permissions?: string[];
 }
 
 interface AuthState {
@@ -21,6 +22,7 @@ interface AuthState {
   logout: () => void;
   canEdit: boolean;
   isAdmin: boolean;
+  hasView: (view: string) => boolean;
 }
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
@@ -122,6 +124,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const canEdit = user?.role === 'editor' || user?.role === 'admin';
   const isAdmin = user?.role === 'admin';
+  // L'admin voit tout ; sinon on se base sur les onglets attribués à l'utilisateur.
+  const hasView = (view: string) => isAdmin || !!user?.permissions?.includes(view);
 
   return (
     <AuthContext.Provider value={{
@@ -133,7 +137,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       logout,
       canEdit,
-      isAdmin
+      isAdmin,
+      hasView
     }}>
       {children}
     </AuthContext.Provider>
