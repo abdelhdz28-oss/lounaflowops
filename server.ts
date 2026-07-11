@@ -3070,7 +3070,8 @@ async function loadMirageDefectTypes(): Promise<string[]> {
 }
 
 app.get('/api/mirage/defect-types', authenticateToken, requireView('mirage'), async (_req: AuthRequest, res: Response) => {
-  res.json({ types: await loadMirageDefectTypes() });
+  try { res.json({ types: await loadMirageDefectTypes() }); }
+  catch (e) { console.error('mirage defect-types', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.post('/api/mirage/defect-types', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {

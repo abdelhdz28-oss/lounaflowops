@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAppContext } from '../AppContext';
 import { cn } from '../utils/cn';
 import { Batch, FluxConfig } from '../types';
@@ -167,22 +167,28 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   const productTypeOf = (b: Batch) => productCatalog.find(p => p.ref === b.reference)?.type || b.product || '';
 
   // Options des menus déroulants (valeurs réellement présentes). value = clé filtrée, label = affichage.
-  const uniqTxt = (vals: (string | undefined)[]) =>
-    Array.from(new Set(vals.filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }));
-  const optId = uniqTxt(batchList.map(b => b?.id)).map(v => ({ value: v, label: v }));
-  const optProduct = uniqTxt(batchList.map(productTypeOf)).map(v => ({ value: v, label: v }));
-  const optClient = uniqTxt(batchList.map(b => b?.client)).map(v => ({ value: v, label: v }));
-  const optStep = uniqTxt(batchList.map(b => b?.process_stage)).map(v => ({ value: v, label: PROCESS_STAGE_LABELS[v] || v }));
-  const optQuality = uniqTxt(batchList.map(b => b?.quality_status)).map(v => ({ value: v, label: QUALITY_STATUS_MAP[v]?.label || v }));
-  const optHealth = uniqTxt(batchList.map(b => b?.schedule_health)).map(v => ({ value: v, label: SCHEDULE_HEALTH_MAP[v]?.label || v }));
-  // Dates : regroupées par mois (clé triable "AAAA-MM", label "juil. 2026").
-  const monthOpts = (vals: (string | undefined)[]) =>
-    Array.from(new Set(vals.map(monthKey).filter(Boolean))).sort().map(v => ({ value: v, label: monthLabel(v) }));
-  const optStart = monthOpts(batchList.map(b => b?.startDate));
-  const optEnd = monthOpts(batchList.map(b => b?.endDate));
-  const optDelivery = monthOpts(batchList.map(b => b?.deliveryDate));
-  const optProgress = Array.from(new Set(batchList.map(b => String(b?.progress ?? 0))))
-    .sort((a, b) => Number(a) - Number(b)).map(v => ({ value: v, label: `${v}%` }));
+  // Mémorisées : recalculées uniquement quand les lots ou le catalogue changent (pas à chaque filtre/tri).
+  const { optId, optProduct, optClient, optStep, optQuality, optHealth, optStart, optEnd, optDelivery, optProgress } = useMemo(() => {
+    const uniqTxt = (vals: (string | undefined)[]) =>
+      Array.from(new Set(vals.filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }));
+    // Dates : regroupées par mois (clé triable "AAAA-MM", label "juil. 2026").
+    const monthOpts = (vals: (string | undefined)[]) =>
+      Array.from(new Set(vals.map(monthKey).filter(Boolean))).sort().map(v => ({ value: v, label: monthLabel(v) }));
+    return {
+      optId: uniqTxt(batchList.map(b => b?.id)).map(v => ({ value: v, label: v })),
+      optProduct: uniqTxt(batchList.map(productTypeOf)).map(v => ({ value: v, label: v })),
+      optClient: uniqTxt(batchList.map(b => b?.client)).map(v => ({ value: v, label: v })),
+      optStep: uniqTxt(batchList.map(b => b?.process_stage)).map(v => ({ value: v, label: PROCESS_STAGE_LABELS[v] || v })),
+      optQuality: uniqTxt(batchList.map(b => b?.quality_status)).map(v => ({ value: v, label: QUALITY_STATUS_MAP[v]?.label || v })),
+      optHealth: uniqTxt(batchList.map(b => b?.schedule_health)).map(v => ({ value: v, label: SCHEDULE_HEALTH_MAP[v]?.label || v })),
+      optStart: monthOpts(batchList.map(b => b?.startDate)),
+      optEnd: monthOpts(batchList.map(b => b?.endDate)),
+      optDelivery: monthOpts(batchList.map(b => b?.deliveryDate)),
+      optProgress: Array.from(new Set(batchList.map(b => String(b?.progress ?? 0))))
+        .sort((a, b) => Number(a) - Number(b)).map(v => ({ value: v, label: `${v}%` })),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchList, productCatalog]);
 
   const hasActiveFilters =
     filterId.length > 0 || filterProduct.length > 0 || filterClient.length > 0 || filterStep.length > 0 ||

@@ -1,36 +1,39 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import { AppProvider, useAppContext } from './AppContext';
 import { LoginPage } from './components/LoginPage';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
-import { DashboardView } from './views/DashboardView';
-import { KanbanView } from './views/KanbanView';
-import { PrepProdView } from './views/PrepProdView';
-import { ForecastsView } from './views/ForecastsView';
-import { VentesView } from './views/VentesView';
-import { QualityView } from './views/QualityView';
-import { MirageView } from './views/MirageView';
-import { DataHistoryView } from './views/DataHistoryView';
-import { DeliveriesView } from './views/DeliveriesView';
-import { OpsReportingView } from './views/OpsReportingView';
-import { OdooView } from './views/OdooView';
-import { SupplyChainView } from './views/SupplyChainView';
-import { CoaTrackingView } from './views/CoaTrackingView';
-import { CockpitView } from './views/CockpitView';
-import { QmsView } from './views/QmsView';
-import { QmsDocListView } from './views/QmsDocListView';
-import { QmsCapaView } from './views/QmsCapaView';
-import { QmsRisquesView } from './views/QmsRisquesView';
-import { QmsEquipementView } from './views/QmsEquipementView';
-import { QmsFournisseursView } from './views/QmsFournisseursView';
-import { PackingListView } from './views/PackingListView';
 import { MayaChat } from './components/MayaChat';
-import { SettingsView } from './views/SettingsView';
-import { UsersView } from './views/UsersView';
-import { AuditLogsView } from './views/AuditLogsView';
 import { BatchDrawer } from './components/BatchDrawer';
 import { Loader2 } from 'lucide-react';
+
+// Vues chargées à la demande (code splitting) : chaque onglet n'est téléchargé
+// qu'à sa première ouverture, ce qui allège fortement le chargement initial.
+const DashboardView = lazy(() => import('./views/DashboardView').then(m => ({ default: m.DashboardView })));
+const KanbanView = lazy(() => import('./views/KanbanView').then(m => ({ default: m.KanbanView })));
+const PrepProdView = lazy(() => import('./views/PrepProdView').then(m => ({ default: m.PrepProdView })));
+const ForecastsView = lazy(() => import('./views/ForecastsView').then(m => ({ default: m.ForecastsView })));
+const VentesView = lazy(() => import('./views/VentesView').then(m => ({ default: m.VentesView })));
+const QualityView = lazy(() => import('./views/QualityView').then(m => ({ default: m.QualityView })));
+const MirageView = lazy(() => import('./views/MirageView').then(m => ({ default: m.MirageView })));
+const DataHistoryView = lazy(() => import('./views/DataHistoryView').then(m => ({ default: m.DataHistoryView })));
+const DeliveriesView = lazy(() => import('./views/DeliveriesView').then(m => ({ default: m.DeliveriesView })));
+const OpsReportingView = lazy(() => import('./views/OpsReportingView').then(m => ({ default: m.OpsReportingView })));
+const OdooView = lazy(() => import('./views/OdooView').then(m => ({ default: m.OdooView })));
+const SupplyChainView = lazy(() => import('./views/SupplyChainView').then(m => ({ default: m.SupplyChainView })));
+const CoaTrackingView = lazy(() => import('./views/CoaTrackingView').then(m => ({ default: m.CoaTrackingView })));
+const CockpitView = lazy(() => import('./views/CockpitView').then(m => ({ default: m.CockpitView })));
+const QmsView = lazy(() => import('./views/QmsView').then(m => ({ default: m.QmsView })));
+const QmsDocListView = lazy(() => import('./views/QmsDocListView').then(m => ({ default: m.QmsDocListView })));
+const QmsCapaView = lazy(() => import('./views/QmsCapaView').then(m => ({ default: m.QmsCapaView })));
+const QmsRisquesView = lazy(() => import('./views/QmsRisquesView').then(m => ({ default: m.QmsRisquesView })));
+const QmsEquipementView = lazy(() => import('./views/QmsEquipementView').then(m => ({ default: m.QmsEquipementView })));
+const QmsFournisseursView = lazy(() => import('./views/QmsFournisseursView').then(m => ({ default: m.QmsFournisseursView })));
+const PackingListView = lazy(() => import('./views/PackingListView').then(m => ({ default: m.PackingListView })));
+const SettingsView = lazy(() => import('./views/SettingsView').then(m => ({ default: m.SettingsView })));
+const UsersView = lazy(() => import('./views/UsersView').then(m => ({ default: m.UsersView })));
+const AuditLogsView = lazy(() => import('./views/AuditLogsView').then(m => ({ default: m.AuditLogsView })));
 
 function AppContent() {
   const { loading } = useAppContext();
@@ -135,6 +138,11 @@ function AppContent() {
             Aucun onglet ne vous est accessible. Contactez un administrateur.
           </div>
         )}
+        <Suspense fallback={
+          <div className="flex-1 flex items-center justify-center text-slate-400">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…
+          </div>
+        }>
         {activeView === 'dashboard' && <DashboardView onOpenBatch={setSelectedBatchId} />}
         {activeView === 'kanban' && <KanbanView onOpenBatch={setSelectedBatchId} />}
         {activeView && activeView.startsWith('prepprod') && <PrepProdView view={activeView} onOpenBatch={setSelectedBatchId} />}
@@ -160,6 +168,7 @@ function AppContent() {
         {activeView === 'users' && <UsersView />}
         {activeView === 'audit' && <AuditLogsView />}
         {activeView === 'settings' && <SettingsView />}
+        </Suspense>
       </main>
 
       {selectedBatchId && (
