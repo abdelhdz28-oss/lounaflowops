@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Loader2, Search, ExternalLink, AlertTriangle } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
+import { fmtDate } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -11,7 +12,6 @@ const STATUS_COLOR: Record<string, string> = {
 };
 const CLASS_COLOR: Record<string, string> = { 'Critical': 'bg-red-100 text-red-700', 'Major': 'bg-orange-100 text-orange-700', 'Minor': 'bg-slate-100 text-slate-600' };
 const CAT_LABEL: Record<string, string> = { MP: 'Matière première', AC: 'Article conditionnement', AT: 'Article technique', '': 'Autre' };
-const fmtDate = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR'); };
 const expirySoon = (iso: string | null) => { if (!iso) return false; const d = new Date(iso); if (isNaN(d.getTime())) return false; return d.getTime() < Date.now() + 90 * 864e5; };
 
 export function QmsFournisseursView() {

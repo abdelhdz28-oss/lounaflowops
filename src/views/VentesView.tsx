@@ -3,6 +3,7 @@ import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
 import { Plus, Trash2, Loader2, ChevronUp, ChevronDown, ChevronsUpDown, RefreshCw, FileDown, Archive } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import { MultiSelect } from '../components/MultiSelect';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 const MOIS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun', 'Jul', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc'];
@@ -131,37 +132,6 @@ export function VentesView() {
   );
 }
 
-// Filtre multichoix (cases à cocher dans un menu déroulant).
-function MultiSelect({ label, options, selected, onChange }: { label: string; options: string[]; selected: Set<string>; onChange: (s: Set<string>) => void }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="relative">
-      <button onClick={() => setOpen(o => !o)} className="text-sm border border-slate-300 rounded-md px-3 py-1.5 bg-white flex items-center gap-1.5 hover:bg-slate-50">
-        {label}{selected.size > 0 && <span className="bg-blue-100 text-blue-700 rounded-full px-1.5 text-[10px] font-medium">{selected.size}</span>}
-        <ChevronDown className="w-3 h-3 text-slate-400" />
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute z-20 mt-1 w-72 max-h-72 overflow-auto bg-white border border-slate-200 rounded-lg shadow-lg p-2">
-            <div className="flex justify-between items-center px-1 pb-1 mb-1 border-b border-slate-100">
-              <span className="text-[11px] text-slate-400">{selected.size} sélectionné(s)</span>
-              {selected.size > 0 && <button onClick={() => onChange(new Set())} className="text-[11px] text-blue-600 hover:underline">Tout effacer</button>}
-            </div>
-            {options.map(o => (
-              <label key={o} className="flex items-center gap-2 px-1 py-1 text-xs hover:bg-slate-50 rounded cursor-pointer">
-                <input type="checkbox" checked={selected.has(o)} onChange={() => { const n = new Set(selected); n.has(o) ? n.delete(o) : n.add(o); onChange(n); }} className="accent-blue-600" />
-                <span className="truncate" title={o}>{o}</span>
-              </label>
-            ))}
-            {options.length === 0 && <div className="text-xs text-slate-400 px-1 py-2">Aucune option</div>}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 // Registre des commandes : miroir auto-synchronisé du fichier Excel + tri par colonne + date de facture (saisie app).
 function RegistreCommandes() {
   const { token, socket } = useAuth();
@@ -239,8 +209,8 @@ function RegistreCommandes() {
           <option value="">Toutes années</option>
           {years.map((y: any) => <option key={y} value={String(y)}>{y}</option>)}
         </select>
-        <MultiSelect label="Pays" options={countryOpts as string[]} selected={countrySel} onChange={setCountrySel} />
-        <MultiSelect label="Nom commercial" options={nameOpts as string[]} selected={nameSel} onChange={setNameSel} />
+        <MultiSelect label="Pays" options={countryOpts as string[]} selected={countrySel} onChange={setCountrySel} width="w-72" />
+        <MultiSelect label="Nom commercial" options={nameOpts as string[]} selected={nameSel} onChange={setNameSel} width="w-72" />
         {(countrySel.size > 0 || nameSel.size > 0 || yearF || q) && <button onClick={() => { setCountrySel(new Set()); setNameSel(new Set()); setYearF(''); setQ(''); }} className="text-xs text-slate-500 hover:text-blue-600 underline">Réinitialiser</button>}
         <div className="text-sm text-slate-500 ml-auto">{filtered.length} commande(s) · <b className="text-slate-800">{totalUnits.toLocaleString('fr-FR')}</b> boîtes · <span className="text-xs text-slate-400">🔄 synchronisé depuis Excel</span></div>
       </div>

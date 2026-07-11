@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Loader2, Search } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
+import { fmtDate, fmtMonth } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -11,8 +12,6 @@ const STATUS_COLOR: Record<string, string> = {
   'Obsolete': 'bg-slate-200 text-slate-600',
   'Hors Service': 'bg-red-100 text-red-700',
 };
-const fmtDate = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR'); };
-const fmtMonth = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' }); };
 
 const TYPE_SHORT: Record<string, string> = { Maintenance: 'Maint.', 'Étalonnage': 'Étal.', Calib: 'Calib.', Verif: 'Vérif.', QO: 'QO', QI: 'QI', QP: 'QP' };
 const shortType = (t: string) => TYPE_SHORT[t] || t;

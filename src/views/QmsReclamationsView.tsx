@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Plus, X, ArrowRightCircle, Loader2, Link2, AlertTriangle } from 'lucide-react';
+import { fmtDate } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -10,7 +11,6 @@ const TRANSITIONS: Record<string, string[]> = {
 };
 const STATUT_LABEL: Record<string, string> = { OUVERTE: 'Ouverte', EN_INVESTIGATION: 'En investigation', CAPA_OUVERTE: 'CAPA ouverte', CLOTUREE: 'Clôturée' };
 const STATUT_COLOR: Record<string, string> = { OUVERTE: 'bg-amber-100 text-amber-700', EN_INVESTIGATION: 'bg-blue-100 text-blue-700', CAPA_OUVERTE: 'bg-violet-100 text-violet-700', CLOTUREE: 'bg-emerald-100 text-emerald-700' };
-const fmtDate = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR'); };
 
 export function QmsReclamationsView() {
   const { token, socket, canEdit } = useAuth();

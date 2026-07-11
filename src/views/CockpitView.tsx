@@ -3,6 +3,7 @@ import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
 import { Plus, Trash2, Loader2, X, Settings2, ChevronUp, ChevronDown, ChevronsUpDown, Pencil, RefreshCw } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, ComposedChart, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine, Cell } from 'recharts';
+import { MultiSelect } from '../components/MultiSelect';
 import { CogsFamilyView } from './CogsFamilyView';
 import { NomenclatureView } from './NomenclatureView';
 import { CogsFillerView } from './CogsFillerView';
@@ -98,36 +99,6 @@ export function CockpitView({ view }: { view: string }) {
 // ============================================================================
 // Filtres partagés (Année / Produit / Site)
 // ============================================================================
-// Filtre multichoix (cases à cocher dans un menu déroulant).
-function MultiSelect({ label, options, selected, onChange }: { label: string; options: string[]; selected: Set<string>; onChange: (s: Set<string>) => void }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="relative">
-      <button onClick={() => setOpen(o => !o)} className="text-sm border border-slate-300 rounded-md px-3 py-1.5 bg-white flex items-center gap-1.5 hover:bg-slate-50">
-        {label}{selected.size > 0 && <span className="bg-blue-100 text-blue-700 rounded-full px-1.5 text-[10px] font-medium">{selected.size}</span>}
-        <ChevronDown className="w-3 h-3 text-slate-400" />
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute z-20 mt-1 w-64 max-h-72 overflow-auto bg-white border border-slate-200 rounded-lg shadow-lg p-2">
-            <div className="flex justify-between items-center px-1 pb-1 mb-1 border-b border-slate-100">
-              <span className="text-[11px] text-slate-400">{selected.size} sélectionné(s)</span>
-              {selected.size > 0 && <button onClick={() => onChange(new Set())} className="text-[11px] text-blue-600 hover:underline">Tout effacer</button>}
-            </div>
-            {options.map(o => (
-              <label key={o} className="flex items-center gap-2 px-1 py-1 text-xs hover:bg-slate-50 rounded cursor-pointer">
-                <input type="checkbox" checked={selected.has(o)} onChange={() => { const n = new Set(selected); n.has(o) ? n.delete(o) : n.add(o); onChange(n); }} className="accent-blue-600" />
-                <span className="truncate" title={o}>{o}</span>
-              </label>
-            ))}
-            {options.length === 0 && <div className="text-xs text-slate-400 px-1 py-2">Aucune option</div>}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
 
 function useFilters(lots: Lot[], reload?: () => void) {
   const [yearSel, setYearSel] = useState<Set<string>>(new Set());

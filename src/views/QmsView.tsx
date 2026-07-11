@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { RefreshCw, ExternalLink, Search, AlertTriangle, CheckCircle2, Loader2, FileText } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
+import { fmtDate } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -18,11 +19,6 @@ const TYPE_COLOR: Record<string, string> = {
 const STATE_LABEL: Record<string, string> = { APPROVED: 'Approuvé', IN_MODIF: 'En modification', ARCHIVE: 'Archive', RECORD: 'Record', OTHER: 'Autre' };
 const STATE_COLOR: Record<string, string> = { APPROVED: 'bg-emerald-100 text-emerald-700', IN_MODIF: 'bg-amber-100 text-amber-700', ARCHIVE: 'bg-slate-100 text-slate-500', RECORD: 'bg-sky-100 text-sky-700', OTHER: 'bg-slate-100 text-slate-500' };
 
-const fmtDate = (iso: string | null) => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
 const fmtSize = (b: number | null) => {
   if (b == null) return '';
   if (b < 1024) return `${b} o`;

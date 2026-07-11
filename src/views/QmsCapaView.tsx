@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
+import { fmtDate } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
 const KIND_LABEL: Record<string, string> = { NC: 'Non-conformité', CAPA: 'CAPA', CC: 'Change Control' };
 const KIND_COLOR: Record<string, string> = { NC: 'bg-orange-100 text-orange-700', CAPA: 'bg-violet-100 text-violet-700', CC: 'bg-sky-100 text-sky-700' };
-const fmtDate = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR'); };
 const isOverdue = (due: string | null, status: string) => { if (!due || status !== 'OPEN') return false; const d = new Date(due); return !isNaN(d.getTime()) && d.getTime() < Date.now(); };
 
 export function QmsCapaView() {

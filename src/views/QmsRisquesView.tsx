@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Loader2, ExternalLink, FileText, Search } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
+import { fmtDate } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
 const CAT_COLOR: Record<string, string> = { GAP: 'bg-blue-100 text-blue-700', BIOSTERIL: 'bg-violet-100 text-violet-700', AUTRE: 'bg-slate-100 text-slate-600' };
 
-const fmtDate = (iso: string | null) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR'); };
 // Date d'approbation : extraite du nom de fichier (BioSteril → « 11.06.2024 » / « 13.03.2025 »), sinon n/a.
 const approvalFromName = (name: string): string | null => {
   const m = (name || '').match(/(\d{2})[.\-_](\d{2})[.\-_](\d{4})/);

@@ -10,6 +10,7 @@ import AdmZip from 'adm-zip';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { geminiUploadPdf, geminiGenerateJson, geminiDeleteFile } from './lib/gemini';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -3097,36 +3098,14 @@ app.post('/api/mirage/extract', authenticateToken, requireView('mirage'), expres
     const buf = req.body as Buffer;
     if (!buf || !buf.length) return res.status(400).json({ error: 'Fichier vide' });
     const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const GL = 'https://generativelanguage.googleapis.com';
     // Envoi du PDF via la Files API (gère les gros dossiers scannés, sans la limite ~20 Mo de l'inline).
-    const startRes = await fetch(`${GL}/upload/v1beta/files?key=${key}`, {
-      method: 'POST',
-      headers: {
-        'X-Goog-Upload-Protocol': 'resumable', 'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': String(buf.length),
-        'X-Goog-Upload-Header-Content-Type': 'application/pdf', 'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ file: { display_name: 'dossier_lot' } }),
-    });
-    const uploadUrl = startRes.headers.get('x-goog-upload-url');
-    if (!startRes.ok || !uploadUrl) { console.error('gemini upload start', startRes.status); return res.status(502).json({ error: "Lecture IA indisponible (envoi du PDF)." }); }
-    const upRes = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Length': String(buf.length), 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' },
-      body: buf,
-    });
-    const upData: any = await upRes.json().catch(() => ({}));
-    if (!upRes.ok || !upData.file?.uri) { console.error('gemini upload', upRes.status, upData); return res.status(502).json({ error: "Lecture IA indisponible (envoi du PDF)." }); }
-    const fileName = upData.file.name;
-    let fileUri = upData.file.uri;
-    let state = upData.file.state;
-    for (let k = 0; k < 15 && state === 'PROCESSING'; k++) {
-      await new Promise(rz => setTimeout(rz, 1000));
-      const st = await fetch(`${GL}/v1beta/${fileName}?key=${key}`);
-      const sd: any = await st.json().catch(() => ({}));
-      state = sd.state; fileUri = sd.uri || fileUri;
+    const up = await geminiUploadPdf(key, buf, 'dossier_lot', 15);
+    if (!up.ok) {
+      if (up.stage === 'processing') return res.status(502).json({ error: "Le PDF n'a pas pu être préparé pour la lecture (réessayez)." });
+      console.error(up.stage === 'start' ? 'gemini upload start' : 'gemini upload', up.status, up.detail ?? '');
+      return res.status(502).json({ error: "Lecture IA indisponible (envoi du PDF)." });
     }
-    if (state && state !== 'ACTIVE') return res.status(502).json({ error: "Le PDF n'a pas pu être préparé pour la lecture (réessayez)." });
+    const { fileUri, fileName } = up;
     // Catalogue Track&Production (settings.productCatalog) : nom commercial → type de produit + référence.
     let catalog: any[] = DEFAULT_PRODUCT_CATALOG;
     try {
@@ -3158,29 +3137,8 @@ DÉFAUTS (defects) : un objet {type, count} par défaut réel. IMPORTANT — qua
 RÉFÉRENTIEL DES TYPES DE DÉFAUTS : rationalise CHAQUE défaut vers UN type de cette liste EXACTE (recopie le libellé à l'identique) — la formulation varie d'un dossier à l'autre mais le fond est le même (ex. « tache jaune », « particules jaunes », « fibres jaunes » → « Particules/fibres jaunes ») ; ADDITIONNE les quantités des libellés qui pointent vers le même type :
 ${dtypes.map(t => `- ${t}`).join('\n')}
 Si un défaut ne correspond VRAIMENT à aucun type de la liste, garde le libellé lu tel quel (il sera signalé comme nouveau). Réponds par le JSON seul.`;
-    // Jusqu'à 3 tentatives : encaisse les erreurs d'API passagères (surcharge) ET les réponses tronquées/illisibles.
     // maxOutputTokens relevé à 8192 pour éviter que le JSON soit coupé sur les dossiers riches en défauts.
-    const genOnce = async (extraText: string): Promise<any | null> => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt > 0) await new Promise(rz => setTimeout(rz, 800 * attempt));
-        const r = await fetch(`${GL}/v1beta/models/${model}:generateContent?key=${key}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [
-              { file_data: { mime_type: 'application/pdf', file_uri: fileUri } },
-              { text: prompt + extraText },
-            ] }],
-            generationConfig: { temperature: 0, maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 0 } },
-          }),
-        });
-        const data: any = await r.json().catch(() => ({}));
-        if (!r.ok) { console.error('gemini mirage', r.status, data?.error?.message || ''); continue; } // erreur API → nouvelle tentative
-        const txt = (data.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
-        try { const m = txt.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); } catch { /* JSON tronqué/invalide → nouvelle tentative */ }
-      }
-      return null;
-    };
+    const genOnce = (extraText: string) => geminiGenerateJson(key, model, [fileUri], prompt + extraText, { maxOutputTokens: 8192, logLabel: 'gemini mirage' });
     const defectsSum = (p: any) => Array.isArray(p?.defects) ? p.defects.reduce((s: number, d: any) => s + (Number(d?.count) || 0), 0) : 0;
     const coherent = (p: any) => p && p.qty_rejected != null && Array.isArray(p.defects) && p.defects.length > 0 && defectsSum(p) === Number(p.qty_rejected);
 
@@ -3194,7 +3152,7 @@ Si un défaut ne correspond VRAIMENT à aucun type de la liste, garde le libell�
         warning = `Attention : incohérence entre les unités rejetées (${parsed?.qty_rejected ?? '?'}) et le total des défauts répertoriés (${defectsSum(parsed)}), malgré une double lecture. Vérifiez le dossier de lot.`;
       }
     }
-    fetch(`${GL}/v1beta/${fileName}?key=${key}`, { method: 'DELETE' }).catch(() => {});
+    geminiDeleteFile(key, fileName);
     if (!parsed) return res.status(422).json({ error: "L'IA n'a pas réussi à lire cette page. Vous pouvez saisir les valeurs manuellement." });
     // Rationalisation serveur : chaque défaut est ramené au référentiel (même clé = même type, quantités additionnées).
     const newTypes: string[] = [];
@@ -3294,24 +3252,12 @@ app.post('/api/rendement/extract', authenticateToken, requireView('quality'), as
     const filesIn: any[] = Array.isArray(req.body?.files) ? req.body.files.slice(0, 3) : [];
     if (!filesIn.length) return res.status(400).json({ error: 'Aucun fichier' });
     const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const GL = 'https://generativelanguage.googleapis.com';
     // Téléverse chaque PDF vers la Files API et récupère son file_uri (lecture consolidée dans une seule requête).
     const uploadOne = async (b64: string): Promise<string | null> => {
       const buf = Buffer.from(String(b64 || '').split(',').pop() || '', 'base64');
       if (!buf.length) return null;
-      const startRes = await fetch(`${GL}/upload/v1beta/files?key=${key}`, {
-        method: 'POST',
-        headers: { 'X-Goog-Upload-Protocol': 'resumable', 'X-Goog-Upload-Command': 'start', 'X-Goog-Upload-Header-Content-Length': String(buf.length), 'X-Goog-Upload-Header-Content-Type': 'application/pdf', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: { display_name: 'ddl' } }),
-      });
-      const uploadUrl = startRes.headers.get('x-goog-upload-url');
-      if (!startRes.ok || !uploadUrl) return null;
-      const upRes = await fetch(uploadUrl, { method: 'POST', headers: { 'Content-Length': String(buf.length), 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' }, body: buf });
-      const upData: any = await upRes.json().catch(() => ({}));
-      if (!upRes.ok || !upData.file?.uri) return null;
-      const fileName = upData.file.name; let fileUri = upData.file.uri; let state = upData.file.state;
-      for (let k = 0; k < 20 && state === 'PROCESSING'; k++) { await new Promise(rz => setTimeout(rz, 1000)); const st = await fetch(`${GL}/v1beta/${fileName}?key=${key}`); const sd: any = await st.json().catch(() => ({})); state = sd.state; fileUri = sd.uri || fileUri; }
-      return (state && state !== 'ACTIVE') ? null : fileUri;
+      const up = await geminiUploadPdf(key, buf, 'ddl', 20);
+      return up.ok ? up.fileUri : null;
     };
     const uris = (await Promise.all(filesIn.map((f: any) => uploadOne(f?.data ?? f)))).filter(Boolean) as string[];
     if (!uris.length) return res.status(502).json({ error: "Lecture IA indisponible (envoi des PDF)." });
@@ -3337,21 +3283,7 @@ Ou trouver chaque information :
 - masse_gel_g = masse de gel mise a disposition pour le remplissage (grammes). vol_moyen_ml = volume moyen de remplissage par unite (ml). masse_moyenne_g = masse moyenne de gel par unite remplie (grammes) si une pesee moyenne est indiquee.
 Regles : ne DEVINE jamais un chiffre ; valeur absente ou illisible = null. Dates au format AAAA-MM-JJ. Reponds par le JSON seul.`;
 
-    const genOnce = async (): Promise<any | null> => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt > 0) await new Promise(rz => setTimeout(rz, 800 * attempt));
-        const r = await fetch(`${GL}/v1beta/models/${model}:generateContent?key=${key}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [...uris.map(u => ({ file_data: { mime_type: 'application/pdf', file_uri: u } })), { text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } } }),
-        });
-        const data: any = await r.json().catch(() => ({}));
-        if (!r.ok) { console.error('rendement gemini', r.status, data?.error?.message || ''); continue; }
-        const txt = (data.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
-        try { const m = txt.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); } catch { /* retry */ }
-      }
-      return null;
-    };
-    const parsed = await genOnce();
+    const parsed = await geminiGenerateJson(key, model, uris, prompt, { maxOutputTokens: 4096, logLabel: 'rendement gemini' });
     if (!parsed) return res.status(422).json({ error: "L'IA n'a pas réussi à lire ce(s) DDL. Vous pouvez saisir les valeurs manuellement." });
 
     // Application des règles métier pour dériver les 4 quantités de la chaîne.
