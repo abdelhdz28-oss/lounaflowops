@@ -14,7 +14,10 @@
     "clean": "rm -rf dist node_modules",
     "lint": "tsc --noEmit",
     "fly:deploy": "fly deploy",
-    "fly:logs": "fly logs"
+    "fly:logs": "fly logs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -42,6 +45,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/adm-zip": "^0.5.8",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
@@ -50,7 +54,8 @@
     "@types/node": "^22.14.0",
     "@types/pg": "^8.11.13",
     "autoprefixer": "^10.4.21",
-    "tailwindcss": "^4.1.14"
+    "tailwindcss": "^4.1.14",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=18.0.0"

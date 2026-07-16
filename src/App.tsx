@@ -41,6 +41,7 @@ function AppContent() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [presentation, setPresentation] = useState(false);
+  const [mayaOpen, setMayaOpen] = useState(false);
 
   // Mode présentation : plein écran + menu masqué + contenu agrandi (pour projeter à l'écran).
   useEffect(() => {
@@ -131,6 +132,7 @@ function AppContent() {
           onNewBatch={handleNewBatch}
           presentation={presentation}
           onTogglePresentation={togglePresentation}
+          onOpenMaya={() => setMayaOpen(true)}
         />
 
         {!activeView && (
@@ -164,7 +166,7 @@ function AppContent() {
         {activeView === 'qms-risques' && <QmsRisquesView />}
         {activeView === 'qms-equip' && <QmsEquipementView />}
         {activeView === 'qms-suppliers' && <QmsFournisseursView />}
-        {activeView && activeView.startsWith('qms') && <MayaChat />}
+        <MayaChat open={mayaOpen} onClose={() => setMayaOpen(false)} />
         {activeView === 'users' && <UsersView />}
         {activeView === 'audit' && <AuditLogsView />}
         {activeView === 'settings' && <SettingsView />}

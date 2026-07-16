@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
-import { Plus, Trash2, Loader2, Save, Check } from 'lucide-react';
+import { Plus, Trash2, Loader2, Save, Check, Lock, Unlock } from 'lucide-react';
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -12,7 +12,7 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 // des postes) → le COGS/unité et /boîte se recalculent en direct.
 // ============================================================================
 
-interface CogsLine { label: string; category: string; qty: number; unit: string; unitPrice: number; scalable?: boolean; }
+interface CogsLine { label: string; category: string; qty: number; unit: string; unitPrice: number; scalable?: boolean; multiple?: number | null; }
 interface CogsModel {
   id: number; code: string; family: string | null; label: string | null;
   batchL: number | null; refBatchL: number | null; volUnitMl: number | null; density: number | null; unitsPerBox: number | null;
@@ -38,7 +38,10 @@ export function batchScale(m: CogsModel): number {
   return (m.batchL && ref) ? m.batchL / ref : 1;
 }
 export function effQty(ln: CogsLine, scale: number): number {
-  return (Number(ln.qty) || 0) * (lineIsScalable(ln) ? scale : 1);
+  const raw = (Number(ln.qty) || 0) * (lineIsScalable(ln) ? scale : 1);
+  // « Multiple » (conditionnement, ex. sachets stériles) : la consommation est arrondie au pack supérieur.
+  const mult = Number(ln.multiple) || 0;
+  return mult > 0 ? Math.ceil(raw / mult) * mult : raw;
 }
 function calcModel(m: CogsModel) {
   const density = m.density || 1;
@@ -67,6 +70,9 @@ export function CogsFamilyView() {
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
   const [realCogs, setRealCogs] = useState<Record<string, number>>({});
+  // F8 : la taille de lot de référence est figée par défaut (lecture seule) ; on peut la défiger pour l'éditer.
+  const [refUnlocked, setRefUnlocked] = useState(false);
+  useEffect(() => { setRefUnlocked(false); }, [selCode]);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -238,8 +244,14 @@ export function CogsFamilyView() {
           <div>
             <div className="text-[11px] font-bold text-blue-700 uppercase mb-2">Paramètres du lot</div>
             <div className="grid grid-cols-2 gap-3">
-              <label className="block"><span className={lbl}>Volume lot (L)</span><input type="number" step="any" disabled={!canEdit} value={numV(draft.batchL)} onChange={setNum('batchL')} className={inp} /></label>
-              <label className="block"><span className={lbl}>Taille lot réf. (L)</span><input type="number" step="any" disabled={!canEdit} value={numV(draft.refBatchL)} onChange={setNum('refBatchL')} className={inp} title="Taille de lot à laquelle les quantités évolutives sont saisies. Les lignes « évolue » sont mises au prorata volume lot ÷ taille réf." /></label>
+              <label className="block"><span className={lbl}>Volume lot cible (L)</span><input type="number" step="any" disabled={!canEdit} value={numV(draft.batchL)} onChange={setNum('batchL')} className={inp} title="Taille de lot cible : la modifier recalcule le COGS et met les quantités évolutives à l'échelle en direct." /></label>
+              <label className="block">
+                <span className={cn(lbl, 'flex items-center justify-between gap-1')}>
+                  <span>Taille lot réf. (L)</span>
+                  {canEdit && <button type="button" onClick={() => setRefUnlocked(u => !u)} title={refUnlocked ? 'Figer la taille de référence' : 'Défiger pour modifier la taille de référence'} className={cn('inline-flex items-center gap-0.5 text-[10px] font-medium', refUnlocked ? 'text-amber-600' : 'text-slate-400 hover:text-blue-600')}>{refUnlocked ? <><Unlock className="w-3 h-3" /> défigée</> : <><Lock className="w-3 h-3" /> figée</>}</button>}
+                </span>
+                <input type="number" step="any" disabled={!canEdit || !refUnlocked} value={numV(draft.refBatchL)} onChange={setNum('refBatchL')} className={inp} title="Taille de lot de référence (figée) : fixe les quantités de base. Les lignes « évolue » sont mises au prorata volume cible ÷ taille réf." />
+              </label>
               <label className="block"><span className={lbl}>Volume / unité (ml)</span><input type="number" step="any" disabled={!canEdit} value={numV(draft.volUnitMl)} onChange={setNum('volUnitMl')} className={inp} /></label>
               <label className="block"><span className={lbl}>Densité</span><input type="number" step="any" disabled={!canEdit} value={numV(draft.density)} onChange={setNum('density')} className={inp} /></label>
               <label className="block"><span className={lbl}>Unités / boîte</span><input type="number" disabled={!canEdit} value={numV(draft.unitsPerBox)} onChange={setNum('unitsPerBox')} className={inp} /></label>
@@ -297,7 +309,7 @@ export function CogsFamilyView() {
       {/* Tableau des postes, groupé par catégorie */}
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-4 py-2.5 border-b border-slate-100 font-semibold text-slate-800 text-sm">
-          Postes de coût <span className="text-xs font-normal text-slate-400">· quantités et prix par lot — tout est éditable, le COGS se recalcule en direct</span>
+          Postes de coût <span className="text-xs font-normal text-slate-400">· tout est éditable, le COGS se recalcule en direct — le petit champ « pack » près de l'unité arrondit la consommation au conditionnement (sachets stériles)</span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
@@ -338,9 +350,14 @@ export function CogsFamilyView() {
                           </td>
                           <td className="px-2 py-1">
                             <input type="number" step="any" disabled={!canEdit} value={ln.qty ?? ''} onChange={e => updLine(i, { qty: e.target.value === '' ? 0 : Number(e.target.value) })} className="w-20 text-right bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 rounded px-1.5 py-1 outline-none text-xs tabular-nums" />
-                            {scal && Math.abs((calc.scale ?? 1) - 1) > 0.001 && <span className="ml-1 text-[10px] text-blue-500 tabular-nums" title="Quantité effective à la taille de lot actuelle">→ {int0(eq)}</span>}
+                            {Math.abs(eq - (Number(ln.qty) || 0)) > 0.001 && <span className="ml-1 text-[10px] text-blue-500 tabular-nums" title="Quantité effective (taille de lot + multiple de conditionnement)">→ {int0(eq)}</span>}
                           </td>
-                          <td className="px-2 py-1"><input disabled={!canEdit} value={ln.unit ?? ''} onChange={e => updLine(i, { unit: e.target.value })} className="w-16 bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 rounded px-1.5 py-1 outline-none text-xs" /></td>
+                          <td className="px-2 py-1">
+                            <div className="flex items-center gap-1">
+                              <input disabled={!canEdit} value={ln.unit ?? ''} onChange={e => updLine(i, { unit: e.target.value })} className="w-16 bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 rounded px-1.5 py-1 outline-none text-xs" />
+                              <input type="number" step="any" min="0" disabled={!canEdit} value={ln.multiple ?? ''} onChange={e => updLine(i, { multiple: e.target.value === '' ? null : Number(e.target.value) })} placeholder="pack" title="Multiple / conditionnement (ex. sachets stériles) : la consommation est arrondie au pack supérieur. Laisser vide si non applicable." className="w-12 text-right bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 rounded px-1 py-1 outline-none text-[11px] tabular-nums text-slate-500" />
+                            </div>
+                          </td>
                           <td className="px-2 py-1"><input type="number" step="any" disabled={!canEdit} value={ln.unitPrice ?? ''} onChange={e => updLine(i, { unitPrice: e.target.value === '' ? 0 : Number(e.target.value) })} className="w-24 text-right bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 rounded px-1.5 py-1 outline-none text-xs tabular-nums" /></td>
                           <td className="px-3 py-1 text-right tabular-nums text-slate-700">{eur2(cost)}</td>
                           <td className="px-3 py-1 text-right tabular-nums text-slate-500">{calc.cogsLot ? (Math.round(cost / calc.cogsLot * 1000) / 10).toLocaleString('fr-FR') : '—'} %</td>

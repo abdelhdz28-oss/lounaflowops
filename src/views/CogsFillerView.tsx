@@ -54,8 +54,9 @@ export function CogsFillerView() {
 
   const result = useMemo(() => model ? computeCogsFiller(model, lines, effPrices) : null, [model, lines, effPrices]);
 
-  // Lignes de campagne
-  const addLine = () => setLines(ls => [...ls, { variant: model.variants[0]?.code || '', boxes: 0, tank: 'auto' }]);
+  // Lignes de campagne — F8.4 : taille de lot par défaut = 1000 boîtes (Louna Filler + Essentyal).
+  const DEFAULT_CAMPAIGN_BOXES = 1000;
+  const addLine = () => setLines(ls => [...ls, { variant: model.variants[0]?.code || '', boxes: DEFAULT_CAMPAIGN_BOXES, tank: 'auto' }]);
   const setLine = (i: number, patch: Partial<CampaignLine>) => setLines(ls => ls.map((l, j) => j === i ? { ...l, ...patch } : l));
   const removeLine = (i: number) => setLines(ls => ls.filter((_, j) => j !== i));
   const switchGamme = (g: string) => { setGamme(g); setLines([]); };   // on repart d'une campagne vide (variants différents)

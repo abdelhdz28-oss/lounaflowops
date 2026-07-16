@@ -39,6 +39,14 @@ function statutLoss(loss: number | null, seuil: number | null, applicable: boole
   if (!applicable || loss == null || seuil == null) return 'NA';
   return loss > seuil ? 'ALERTE' : 'OK';
 }
+// Explique pourquoi le pictogramme « à vérifier » s'affiche sur un lot (infobulle F5.2).
+function motifAVerifier(l: Lot, lossApplicable: boolean): string {
+  const motifs: string[] = [];
+  if (l.aVerifierManuel) motifs.push('Marqué « à vérifier » manuellement');
+  if (lossApplicable && l.lossDrying != null && l.seuilLossDrying != null && l.lossDrying > l.seuilLossDrying)
+    motifs.push(`Loss drying ${fmtPct(l.lossDrying)} supérieur au seuil ${fmtPct(l.seuilLossDrying)}`);
+  return motifs.length ? `À vérifier — ${motifs.join(' · ')}` : 'Donnée à vérifier';
+}
 const fmtKg = (g: number | null) => g == null ? '—' : (g / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' kg';
 // Quantité saisie affichée avec son unité (g / kg / L).
 const fmtQty = (q: number | null, u?: string) => q == null ? '—' : q.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' ' + (u || 'g');
@@ -158,6 +166,9 @@ export function CoaTrackingView({ view }: { view: string }) {
   const { token, socket, canEdit } = useAuth();
   const [board, setBoard] = useState<Board>({ materiaux: [], references: [], lots: [] });
   const [loading, setLoading] = useState(true);
+  // Drill-down depuis une tuile du tableau de bord : ouvre la liste Lots pré-filtrée (F7).
+  const [drill, setDrill] = useState<{ view: string; filter?: any } | null>(null);
+  useEffect(() => { setDrill(null); }, [view]);  // un changement d'onglet via la sidebar annule le drill-down
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -180,12 +191,13 @@ export function CoaTrackingView({ view }: { view: string }) {
 
   if (loading) return <div className="p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
 
+  const effView = drill?.view ?? view;
   return (
     <div className="p-6 flex-1 overflow-auto bg-slate-50">
-      {view === 'coa-dashboard' && <Dashboard board={board} />}
-      {view === 'coa-lots' && <Lots board={board} api={api} token={token} canEdit={canEdit} reload={load} />}
-      {view === 'coa-alertes' && <Alertes board={board} />}
-      {view === 'coa-parametres' && <Parametres board={board} api={api} canEdit={canEdit} />}
+      {effView === 'coa-dashboard' && <Dashboard board={board} onDrill={(filter) => setDrill({ view: 'coa-lots', filter })} />}
+      {effView === 'coa-lots' && <Lots board={board} api={api} token={token} canEdit={canEdit} reload={load} initialFilter={drill?.filter} />}
+      {effView === 'coa-alertes' && <Alertes board={board} />}
+      {effView === 'coa-parametres' && <Parametres board={board} api={api} canEdit={canEdit} />}
     </div>
   );
 }
@@ -204,7 +216,7 @@ function buildAlertes(board: Board) {
 }
 
 // ---------- Dashboard ----------
-function Dashboard({ board }: { board: Board }) {
+function Dashboard({ board, onDrill }: { board: Board; onDrill: (filter: any) => void }) {
   const lots = board.lots;
   const matById = useMemo(() => Object.fromEntries(board.materiaux.map(m => [m.id, m])) as Record<number, Materiau>, [board.materiaux]);
 
@@ -223,12 +235,12 @@ function Dashboard({ board }: { board: Board }) {
     <div>
       <h3 className="text-lg font-semibold text-slate-800 mb-4">CoA Tracking · Tableau de bord</h3>
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
-        <Kpi title="LOTS" value={lots.length} />
+        <Kpi title="LOTS" value={lots.length} onClick={() => onDrill({})} />
         <Kpi title="QUANTITÉ TOTALE" value={`${totalKg} kg`} />
-        <Kpi title="LOSS EN ALERTE" value={alertesLoss} color={alertesLoss ? 'text-red-600' : undefined} />
-        <Kpi title="EXPIRÉS" value={expires} color={expires ? 'text-red-600' : undefined} />
-        <Kpi title="< 90 JOURS" value={aSurveiller} color={aSurveiller ? 'text-amber-600' : undefined} />
-        <Kpi title="À VÉRIFIER" value={aVerifier} color={aVerifier ? 'text-orange-600' : undefined} />
+        <Kpi title="LOSS EN ALERTE" value={alertesLoss} color={alertesLoss ? 'text-red-600' : undefined} onClick={() => onDrill({ lossAlerte: true })} />
+        <Kpi title="EXPIRÉS" value={expires} color={expires ? 'text-red-600' : undefined} onClick={() => onDrill({ peremption: 'EXPIRE' })} />
+        <Kpi title="< 90 JOURS" value={aSurveiller} color={aSurveiller ? 'text-amber-600' : undefined} onClick={() => onDrill({ peremption: 'A_SURVEILLER' })} />
+        <Kpi title="À VÉRIFIER" value={aVerifier} color={aVerifier ? 'text-orange-600' : undefined} onClick={() => onDrill({ aVerifier: true })} />
       </div>
       <div className="grid grid-cols-1 gap-4 mb-6">
         <ChartCard title="1 · Quantité reçue par fournisseur (kg)"><KgParFournisseurChart data={dataFournisseur} /></ChartCard>
@@ -242,9 +254,14 @@ function Dashboard({ board }: { board: Board }) {
     </div>
   );
 }
-function Kpi({ title, value, sub, color }: { title: string; value: React.ReactNode; sub?: string; color?: string }) {
+function Kpi({ title, value, sub, color, onClick }: { title: string; value: React.ReactNode; sub?: string; color?: string; onClick?: () => void }) {
   return (
-    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+    <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      title={onClick ? 'Voir les lots concernés' : undefined}
+      className={cn('bg-white p-4 rounded-xl border border-slate-200 shadow-sm', onClick && 'cursor-pointer hover:border-blue-400 hover:shadow transition-colors')}
+    >
       <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">{title}</div>
       <div className={cn('text-2xl font-bold', sub ? 'mb-0.5' : '', color || 'text-slate-900')}>{value}</div>
       {sub && <div className="text-xs text-slate-500">{sub}</div>}
@@ -293,7 +310,7 @@ function AlertesList({ alertes }: { alertes: { type: string; lot: Lot; label: st
 // ---------- Lots ----------
 const EMPTY_LOT = { materiauId: '', numeroLot: '', fournisseur: '', referenceInterne: '', referenceClient: '', numeroCommande: '', dateCommande: '', dateReception: '', datePeremption: '', quantiteG: '', quantiteUnite: 'g', lossDrying: '', aVerifierManuel: false, commentaire: '' };
 
-function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; token: string | null; canEdit: boolean; reload: () => void }) {
+function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Board; api: any; token: string | null; canEdit: boolean; reload: () => void; initialFilter?: any }) {
   const [editing, setEditing] = useState<any | null>(null);
   const fileInputs = useRef<Record<number, HTMLInputElement | null>>({});
 
@@ -339,6 +356,16 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
   const [peremption, setPeremption] = useState('');
   const [lossAlerte, setLossAlerte] = useState(false);
   const [sansCoa, setSansCoa] = useState(false);
+  const [aVerifierF, setAVerifierF] = useState(false);
+  // Applique le filtre transmis par une tuile du tableau de bord (F7).
+  useEffect(() => {
+    if (!initialFilter) return;
+    setQ(''); setMatiere(''); setFournisseur('');
+    setPeremption(initialFilter.peremption ?? '');
+    setLossAlerte(!!initialFilter.lossAlerte);
+    setSansCoa(!!initialFilter.sansCoa);
+    setAVerifierF(!!initialFilter.aVerifier);
+  }, [initialFilter]);
   const [sortKey, setSortKey] = useState<string>('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const toggleSort = (k: string) => { if (sortKey === k) setSortDir(d => d === 'asc' ? 'desc' : 'asc'); else { setSortKey(k); setSortDir('asc'); } };
@@ -356,13 +383,14 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
       if (peremption && statutPeremption(l.datePeremption) !== peremption) return false;
       if (lossAlerte && statutLoss(l.lossDrying, l.seuilLossDrying, lossApplicable(l)) !== 'ALERTE') return false;
       if (sansCoa && l.hasCoaDoc) return false;
+      if (aVerifierF && !l.aVerifier) return false;
       if (texte) {
         const hay = [l.numeroLot, l.fournisseur, l.referenceInterne, l.numeroCommande, l.materiauCode, l.materiauLibelle].filter(Boolean).join(' ').toLowerCase();
         if (!hay.includes(texte)) return false;
       }
       return true;
     });
-  }, [board.lots, q, matiere, fournisseur, peremption, lossAlerte, sansCoa, matById]);
+  }, [board.lots, q, matiere, fournisseur, peremption, lossAlerte, sansCoa, aVerifierF, matById]);
 
   const kpis = useMemo(() => {
     let kg = 0, alertesLoss = 0, aSurveiller = 0, expires = 0, sansCoaN = 0;
@@ -414,7 +442,7 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
     });
   }, [filtres, sortKey, sortDir]);
 
-  const reset = () => { setQ(''); setMatiere(''); setFournisseur(''); setPeremption(''); setLossAlerte(false); setSansCoa(false); };
+  const reset = () => { setQ(''); setMatiere(''); setFournisseur(''); setPeremption(''); setLossAlerte(false); setSansCoa(false); setAVerifierF(false); };
   const SortTh = ({ k, label, right }: { k: string; label: string; right?: boolean }) => (
     <th className={cn('px-3 py-2', right && 'text-right')}>
       <button onClick={() => toggleSort(k)} className={cn('inline-flex items-center gap-1 uppercase hover:text-slate-700', sortKey === k && 'text-blue-600')}>
@@ -463,6 +491,7 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
           </select>
           <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={lossAlerte} onChange={e => setLossAlerte(e.target.checked)} className="h-4 w-4" /> Loss en alerte</label>
           <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={sansCoa} onChange={e => setSansCoa(e.target.checked)} className="h-4 w-4" /> Sans CoA</label>
+          <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={aVerifierF} onChange={e => setAVerifierF(e.target.checked)} className="h-4 w-4" /> À vérifier</label>
           <button onClick={reset} className="text-sm font-medium text-blue-600 hover:underline">Réinitialiser</button>
         </div>
       </div>
@@ -486,7 +515,7 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
                     {l.referenceClient && <span className="text-xs text-slate-400">{l.referenceClient}</span>}
                   </div>
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-700"><span className="inline-flex items-center gap-1">{l.numeroLot}{l.aVerifier && <AlertTriangle className="w-3.5 h-3.5 text-amber-500" aria-label="Donnée à vérifier" />}</span></td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-700"><span className="inline-flex items-center gap-1">{l.numeroLot}{l.aVerifier && <span title={motifAVerifier(l, lossApplicable(l))} className="inline-flex cursor-help"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" aria-label={motifAVerifier(l, lossApplicable(l))} /></span>}</span></td>
                 <td className="px-3 py-2 text-slate-600">{l.fournisseur}</td>
                 <td className="px-3 py-2 text-slate-600">{l.dateReception ? formatDate(l.dateReception) : '—'}</td>
                 <td className="px-3 py-2">
@@ -497,7 +526,7 @@ function Lots({ board, api, token, canEdit, reload }: { board: Board; api: any; 
                 </td>
                 <td className="px-3 py-2 text-right text-slate-600 tabular-nums">{fmtQty(l.quantiteG, l.quantiteUnite)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
-                  {sl === 'NA' ? <span className="text-slate-400">N/A</span> : <span className={cn('inline-flex items-center justify-end gap-1.5', sl === 'ALERTE' ? 'font-semibold text-red-600' : 'text-slate-700')}>{fmtPct(l.lossDrying)}{sl === 'ALERTE' && <AlertTriangle className="w-3.5 h-3.5" />}</span>}
+                  {sl === 'NA' ? <span className="text-slate-400">N/A</span> : <span className={cn('inline-flex items-center justify-end gap-1.5', sl === 'ALERTE' ? 'font-semibold text-red-600' : 'text-slate-700')}>{fmtPct(l.lossDrying)}{sl === 'ALERTE' && <span title={`Loss drying ${fmtPct(l.lossDrying)} supérieur au seuil ${fmtPct(l.seuilLossDrying)}`} className="inline-flex cursor-help"><AlertTriangle className="w-3.5 h-3.5" aria-label="Loss en alerte" /></span>}</span>}
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-1.5">

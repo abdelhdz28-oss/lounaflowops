@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { geminiUploadPdf, geminiGenerateJson, geminiDeleteFile } from './lib/gemini';
+import { resolveMoveTarget, reorderIds, extractBilanJson } from './lib/opsReporting';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -896,6 +897,75 @@ async function initDatabase() {
         milestones_done INTEGER, milestones_total INTEGER,
         deliverables_done INTEGER, deliverables_total INTEGER,
         retards INTEGER, glissements INTEGER,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // F1 — ordre explicite d'un livrable au sein de son jalon (réordonnancement réservé admin).
+    await client.query(`ALTER TABLE ops_deliverables ADD COLUMN IF NOT EXISTS ordre INTEGER`);
+    // Backfill : numérote 1..n par jalon selon l'ordre de création, pour les lignes pas encore numérotées.
+    await client.query(`
+      WITH ranked AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY milestone_id ORDER BY created_at) AS rn
+        FROM ops_deliverables WHERE ordre IS NULL
+      )
+      UPDATE ops_deliverables d SET ordre = r.rn FROM ranked r WHERE d.id = r.id
+    `);
+    // F2 — statut d'intégration des commentaires hebdo + note de synthèse hebdo versionnée (garde-fou concurrence).
+    await client.query(`ALTER TABLE ops_weekly_comments ADD COLUMN IF NOT EXISTS statut TEXT DEFAULT 'ouvert'`);
+    await client.query(`ALTER TABLE ops_weekly_comments ADD COLUMN IF NOT EXISTS integrated_at TIMESTAMP`);
+    await client.query(`ALTER TABLE ops_weekly_comments ADD COLUMN IF NOT EXISTS integrated_by TEXT`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ops_synthesis_notes (
+        iso_week TEXT PRIMARY KEY,
+        corps TEXT DEFAULT '',
+        version INTEGER DEFAULT 1,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // F4 — bilan IA enregistré (JSON éditable) par semaine.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ops_ia_bilans (
+        iso_week TEXT PRIMARY KEY,
+        contenu JSONB,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Historique des bilans enregistrés (une entrée par enregistrement, horodatée).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ops_bilan_history (
+        id SERIAL PRIMARY KEY,
+        iso_week TEXT,
+        contenu JSONB,
+        created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Compétences de Maya : fiches méthode éditables (nom + déclencheur + contenu) que l'assistant charge à la demande.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS maya_skills (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        trigger TEXT DEFAULT '',
+        body TEXT DEFAULT '',
+        enabled BOOLEAN DEFAULT TRUE,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Mirage : plans d'action qualité enregistrés (proposés par l'IA, éditables, suivis).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS mirage_action_plans (
+        id SERIAL PRIMARY KEY,
+        defaut TEXT DEFAULT '',
+        action TEXT NOT NULL,
+        responsable TEXT DEFAULT '',
+        priorite INTEGER DEFAULT 2,
+        echeance DATE,
+        statut TEXT DEFAULT 'à faire',
+        synthese TEXT DEFAULT '',
+        created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -2635,16 +2705,17 @@ app.delete('/api/deliveries/:id', authenticateToken, requireRole('admin'), async
 // ===================== Module Reporting Ops =====================
 function mapOpsProject(r: any) { return { id: r.id, name: r.name, code: r.code, color: r.color, archived: r.archived, createdAt: r.created_at }; }
 function mapOpsMilestone(r: any) { return { id: r.id, projectId: r.project_id, number: r.number, title: r.title, status: r.status, deadline: r.deadline, owner: r.owner, archived: r.archived }; }
-function mapOpsDeliverable(r: any) { return { id: r.id, milestoneId: r.milestone_id, title: r.title, status: r.status, deadline: r.deadline, owner: r.owner }; }
-function mapOpsComment(r: any) { return { id: r.id, entityType: r.entity_type, entityId: r.entity_id, isoWeek: r.iso_week, text: r.text }; }
+function mapOpsDeliverable(r: any) { return { id: r.id, milestoneId: r.milestone_id, title: r.title, status: r.status, deadline: r.deadline, owner: r.owner, ordre: r.ordre }; }
+function mapOpsComment(r: any) { return { id: r.id, entityType: r.entity_type, entityId: r.entity_id, isoWeek: r.iso_week, text: r.text, statut: r.statut || 'ouvert', integratedAt: r.integrated_at, integratedBy: r.integrated_by }; }
 
 async function loadOpsBoard() {
-  const [p, m, d, c, h] = await Promise.all([
+  const [p, m, d, c, h, sn] = await Promise.all([
     pool.query('SELECT * FROM ops_projects ORDER BY created_at'),
     pool.query('SELECT * FROM ops_milestones ORDER BY number NULLS LAST, created_at'),
-    pool.query('SELECT * FROM ops_deliverables ORDER BY created_at'),
+    pool.query('SELECT * FROM ops_deliverables ORDER BY milestone_id, ordre NULLS LAST, created_at'),
     pool.query('SELECT * FROM ops_weekly_comments'),
     pool.query('SELECT * FROM ops_deadline_history ORDER BY changed_at'),
+    pool.query('SELECT * FROM ops_synthesis_notes'),
   ]);
   const milestones = m.rows.map(mapOpsMilestone);
   const deliverables = d.rows.map(mapOpsDeliverable);
@@ -2675,7 +2746,14 @@ async function loadOpsBoard() {
     deliverables,
     weeklyComments: c.rows.map(mapOpsComment),
     deadlineHistory: h.rows.map(r => ({ id: r.id, entityType: r.entity_type, entityId: r.entity_id, oldDeadline: r.old_deadline, newDeadline: r.new_deadline, isSlip: r.is_slip, changedAt: r.changed_at })),
+    synthesisNotes: sn.rows.map(r => ({ isoWeek: r.iso_week, corps: r.corps || '', version: r.version || 1, updatedBy: r.updated_by, updatedAt: r.updated_at })),
   };
+}
+
+// Libellé lisible d'une entité ops (pour tracer l'origine d'un commentaire intégré dans la note de synthèse).
+async function opsEntityLabel(entityType: string, entityId: string): Promise<string> {
+  if (entityType === 'milestone') { const r = await pool.query('SELECT title FROM ops_milestones WHERE id = $1', [entityId]); return r.rows[0]?.title || 'Jalon'; }
+  const r = await pool.query('SELECT title FROM ops_deliverables WHERE id = $1', [entityId]); return r.rows[0]?.title || 'Livrable';
 }
 
 // Update générique d'une entité ops ; journalise un report d'échéance (forward) dans l'historique.
@@ -2827,6 +2905,29 @@ app.delete('/api/ops/deliverables/:id', authenticateToken, requireRole('editor')
   try { await pool.query('DELETE FROM ops_deliverables WHERE id = $1', [req.params.id]); broadcast('ops:changed', {}); res.json({ success: true }); }
   catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
+// F1 — Réordonner un livrable dans son jalon. Réservé au Multiplicateur (admin). Renumérote 1..n en transaction.
+// Accepte { direction: 'up'|'down' } (flèches) OU { position: n } (saisie directe).
+app.post('/api/ops/deliverables/:id/move', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const cur = await pool.query('SELECT milestone_id FROM ops_deliverables WHERE id = $1', [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Livrable introuvable' });
+    const list = await pool.query('SELECT id FROM ops_deliverables WHERE milestone_id = $1 ORDER BY ordre NULLS LAST, created_at', [cur.rows[0].milestone_id]);
+    const ids: string[] = list.rows.map(r => r.id);
+    const idx = ids.indexOf(req.params.id);
+    const target = resolveMoveTarget(idx, ids.length, { direction: req.body?.direction, position: req.body?.position });
+    if (req.body?.position !== undefined && target < 0) return res.status(400).json({ error: 'Position invalide' });
+    if (target < 0 || target >= ids.length || target === idx) return res.json({ success: true }); // aux extrémités : no-op
+    const ordered = reorderIds(ids, idx, target); // déplacement (pas un simple échange) → gère aussi la saisie de position
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (let i = 0; i < ordered.length; i++) await client.query('UPDATE ops_deliverables SET ordre = $1 WHERE id = $2', [i + 1, ordered[i]]);
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    broadcast('ops:changed', {});
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
 
 // --- Commentaire hebdo (un par entité + semaine ISO) ---
 app.put('/api/ops/comments', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
@@ -2843,6 +2944,205 @@ app.put('/api/ops/comments', authenticateToken, requireRole('editor'), async (re
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
+// --- F2 : note de synthèse hebdo (corps éditable) + intégration des commentaires ---
+function mapSynthesis(r: any) { return { isoWeek: r.iso_week, corps: r.corps || '', version: r.version || 1, updatedBy: r.updated_by, updatedAt: r.updated_at }; }
+
+// Lecture de la note d'une semaine (renvoie une note vide version 0 si aucune n'existe encore).
+app.get('/api/ops/synthesis', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const week = String(req.query.week || '');
+    if (!week) return res.status(400).json({ error: 'Semaine requise' });
+    const r = await pool.query('SELECT * FROM ops_synthesis_notes WHERE iso_week = $1', [week]);
+    if (!r.rows.length) return res.json({ isoWeek: week, corps: '', version: 0, updatedBy: null, updatedAt: null });
+    res.json(mapSynthesis(r.rows[0]));
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Enregistrement du corps avec contrôle de concurrence : la version envoyée doit correspondre à la version en base.
+app.put('/api/ops/synthesis', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isoWeek, corps, version } = req.body || {};
+    if (!isoWeek) return res.status(400).json({ error: 'Semaine requise' });
+    const author = req.user?.username || 'Système';
+    const cur = await pool.query('SELECT version FROM ops_synthesis_notes WHERE iso_week = $1', [isoWeek]);
+    const currentVersion = cur.rows.length ? cur.rows[0].version : 0;
+    if (Number(version) !== Number(currentVersion)) {
+      // Écriture sur une version périmée → refus explicite, pas d'écrasement silencieux.
+      return res.status(409).json({ error: 'La note a été modifiée entre-temps. Rechargez avant d\'enregistrer.', currentVersion });
+    }
+    let row;
+    if (cur.rows.length) {
+      row = (await pool.query('UPDATE ops_synthesis_notes SET corps = $1, version = version + 1, updated_by = $2, updated_at = CURRENT_TIMESTAMP WHERE iso_week = $3 RETURNING *', [corps || '', author, isoWeek])).rows[0];
+    } else {
+      row = (await pool.query('INSERT INTO ops_synthesis_notes (iso_week, corps, version, updated_by) VALUES ($1, $2, 1, $3) RETURNING *', [isoWeek, corps || '', author])).rows[0];
+    }
+    broadcast('ops:changed', {});
+    res.json(mapSynthesis(row));
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// « Intégrer » un commentaire : ajoute son texte au corps de la note et passe le commentaire en statut `intégré` (horodaté + auteur). Transactionnel.
+app.post('/api/ops/comments/integrate', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { entityType, entityId, isoWeek } = req.body || {};
+    if (!entityType || !entityId || !isoWeek) return res.status(400).json({ error: 'Paramètres manquants' });
+    const author = req.user?.username || 'Système';
+    const c = await pool.query('SELECT * FROM ops_weekly_comments WHERE entity_type = $1 AND entity_id = $2 AND iso_week = $3', [entityType, entityId, isoWeek]);
+    if (!c.rows.length || !(c.rows[0].text || '').trim()) return res.status(404).json({ error: 'Commentaire introuvable ou vide' });
+    if (c.rows[0].statut === 'intégré') return res.status(409).json({ error: 'Commentaire déjà intégré' });
+    const label = await opsEntityLabel(entityType, entityId);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const note = await client.query('SELECT corps FROM ops_synthesis_notes WHERE iso_week = $1 FOR UPDATE', [isoWeek]);
+      const prev = note.rows[0]?.corps || '';
+      const nextCorps = `${prev ? prev + '\n' : ''}• ${label} : ${c.rows[0].text}`;
+      if (note.rows.length) await client.query('UPDATE ops_synthesis_notes SET corps = $1, version = version + 1, updated_by = $2, updated_at = CURRENT_TIMESTAMP WHERE iso_week = $3', [nextCorps, author, isoWeek]);
+      else await client.query('INSERT INTO ops_synthesis_notes (iso_week, corps, version, updated_by) VALUES ($1, $2, 1, $3)', [isoWeek, nextCorps, author]);
+      await client.query("UPDATE ops_weekly_comments SET statut = 'intégré', integrated_at = CURRENT_TIMESTAMP, integrated_by = $1 WHERE entity_type = $2 AND entity_id = $3 AND iso_week = $4", [author, entityType, entityId, isoWeek]);
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    broadcast('ops:changed', {});
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// « Résoudre » un commentaire sans l'intégrer.
+app.post('/api/ops/comments/resolve', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { entityType, entityId, isoWeek } = req.body || {};
+    if (!entityType || !entityId || !isoWeek) return res.status(400).json({ error: 'Paramètres manquants' });
+    const r = await pool.query("UPDATE ops_weekly_comments SET statut = 'résolu' WHERE entity_type = $1 AND entity_id = $2 AND iso_week = $3 RETURNING *", [entityType, entityId, isoWeek]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Commentaire introuvable' });
+    broadcast('ops:changed', {});
+    res.json(mapOpsComment(r.rows[0]));
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// --- F4 : bilan IA (DeepSeek, compatible OpenAI) + objectifs hebdomadaires ---
+// Appelle DeepSeek (chat/completions, mode JSON forcé) et renvoie le JSON parsé. Retente une fois si invalide.
+// Renvoie { __noKey: true } si la clé n'est pas configurée, null en cas d'échec définitif.
+// Modèle réglable via DEEPSEEK_BILAN_MODEL (ex. la version « V4 pro »), sinon DEEPSEEK_MODEL, sinon deepseek-chat.
+async function deepseekBilan(system: string, user: string): Promise<any> {
+  const key = process.env.DEEPSEEK_API_KEY;
+  if (!key) return { __noKey: true };
+  const base = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+  const model = process.env.DEEPSEEK_BILAN_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+  const callOnce = async (): Promise<string> => {
+    const r = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, temperature: 0.2, stream: false, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+    });
+    if (!r.ok) { console.error('deepseek bilan', r.status, await r.text().catch(() => '')); return ''; }
+    const d: any = await r.json();
+    return d.choices?.[0]?.message?.content || '';
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const parsed = extractBilanJson(await callOnce());
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+const BILAN_SYSTEM = `Tu es un assistant de pilotage opérationnel. À partir des données d'actions et de livrables fournies (et uniquement d'elles), produis un bilan factuel par projet puis propose des objectifs hebdomadaires SMART.
+Règles :
+- Ne t'appuie que sur les données transmises. N'invente aucun fait ; signale les données manquantes ou incohérentes.
+- Identifie explicitement les actions en retard (échéance dépassée) et les blocages.
+- Objectifs : 3 à 5 par projet, SMART, priorisés, rattachés à des actions/livrables existants, avec un critère de succès mesurable.
+- Réponds en français, ton concret et opérationnel ; objectifs mesurables, pas de généralités.
+- Réponds STRICTEMENT au format JSON suivant, sans texte hors JSON :
+{
+  "bilan": [{ "projet": "", "avancement": "", "faits_marquants": [""], "risques_retards": [""] }],
+  "objectifs_hebdo": [{ "projet": "", "objectifs": [ { "intitule": "", "priorite": 1, "actions_liees": [""], "critere_succes": "" } ]}]
+}`;
+
+// Génère le bilan (ne l'enregistre pas — il est édité côté UI avant sauvegarde).
+app.post('/api/ops/ia-bilan/generate', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const board = await loadOpsBoard();
+    const today = new Date().toISOString().slice(0, 10);
+    const isoWeek = String(req.body?.isoWeek || '');
+    const note = isoWeek ? (board.synthesisNotes.find((n: any) => n.isoWeek === isoWeek)) : null;
+    // Entrée strictement limitée au reporting : projets → jalons → livrables ordonnés (+ retards), et le corps du reporting.
+    const data = board.projects.map((p: any) => ({
+      projet: p.name,
+      jalons: board.milestones.filter((m: any) => m.projectId === p.id).map((m: any) => ({
+        titre: m.title, statut: m.status, echeance: m.deadline || null,
+        en_retard: !!(m.deadline && m.deadline < today && m.status !== 'complete'),
+        livrables: board.deliverables.filter((d: any) => d.milestoneId === m.id).map((d: any) => ({
+          titre: d.title, statut: d.status, echeance: d.deadline || null, responsable: d.owner || null,
+          en_retard: !!(d.deadline && d.deadline < today && d.status !== 'complete'),
+        })),
+      })),
+    }));
+    const user = `Date du jour : ${today}\nSemaine : ${isoWeek || '(non précisée)'}\n\nDONNÉES (actions et livrables ordonnés, par projet) :\n${JSON.stringify(data, null, 1)}\n\n${note?.corps ? 'CORPS DU REPORTING (note de synthèse de la semaine) :\n' + note.corps : '(Aucune note de synthèse pour cette semaine.)'}`;
+    const result = await deepseekBilan(BILAN_SYSTEM, user);
+    if (result?.__noKey) return res.status(503).json({ error: "Bilan IA non configuré (clé DEEPSEEK_API_KEY manquante côté serveur)." });
+    if (!result) return res.status(502).json({ error: "L'IA n'a pas renvoyé de résultat exploitable (réessayez)." });
+    res.json(result);
+  } catch (e) { console.error('ia-bilan generate', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Charge le dernier bilan enregistré pour une semaine.
+app.get('/api/ops/ia-bilan', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const week = String(req.query.week || '');
+    if (!week) return res.status(400).json({ error: 'Semaine requise' });
+    const r = await pool.query('SELECT * FROM ops_ia_bilans WHERE iso_week = $1', [week]);
+    if (!r.rows.length) return res.json(null);
+    res.json({ isoWeek: r.rows[0].iso_week, contenu: r.rows[0].contenu, updatedBy: r.rows[0].updated_by, updatedAt: r.rows[0].updated_at });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Enregistre le bilan (éventuellement édité) attaché à la semaine.
+app.put('/api/ops/ia-bilan', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isoWeek, contenu } = req.body || {};
+    if (!isoWeek || !contenu) return res.status(400).json({ error: 'Semaine et contenu requis' });
+    const author = req.user?.username || 'Système';
+    const payload = JSON.stringify(contenu);
+    await pool.query(
+      `INSERT INTO ops_ia_bilans (iso_week, contenu, updated_by, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+       ON CONFLICT (iso_week) DO UPDATE SET contenu = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP`,
+      [isoWeek, payload, author]
+    );
+    // Conserve chaque enregistrement dans l'historique (horodaté).
+    await pool.query(`INSERT INTO ops_bilan_history (iso_week, contenu, created_by) VALUES ($1, $2, $3)`, [isoWeek, payload, author]);
+    broadcast('ops:changed', {});
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Historique des bilans enregistrés (liste légère : sans le contenu complet).
+app.get('/api/ops/ia-bilan/history', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const week = String(req.query.week || '');
+    const params: any[] = [];
+    let where = '';
+    if (week) { where = 'WHERE iso_week = $1'; params.push(week); }
+    const r = await pool.query(`SELECT id, iso_week, created_by, created_at FROM ops_bilan_history ${where} ORDER BY created_at DESC LIMIT 100`, params);
+    res.json({ history: r.rows.map((x: any) => ({ id: x.id, isoWeek: x.iso_week, createdBy: x.created_by, createdAt: x.created_at })) });
+  } catch (e) { console.error('bilan history', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Contenu complet d'un bilan historisé.
+app.get('/api/ops/ia-bilan/history/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT * FROM ops_bilan_history WHERE id = $1', [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Introuvable' });
+    const x = r.rows[0];
+    res.json({ id: x.id, isoWeek: x.iso_week, contenu: x.contenu, createdBy: x.created_by, createdAt: x.created_at });
+  } catch (e) { console.error('bilan history get', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.delete('/api/ops/ia-bilan/history/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    await pool.query('DELETE FROM ops_bilan_history WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { console.error('bilan history del', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
 // --- Export lecture seule pour l'agent (frontière de sécurité : token dédié ou admin) ---
 app.get('/api/ops-export', async (req: Request, res: Response) => {
   try {
@@ -2856,6 +3156,14 @@ app.get('/api/ops-export', async (req: Request, res: Response) => {
   } catch (e) { console.error('ops-export', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
+// Compétences (fiches méthode) actives de Maya, triées par nom.
+async function loadMayaSkills(): Promise<{ id: number; name: string; trigger: string; body: string }[]> {
+  try {
+    const r = await pool.query('SELECT id, name, trigger, body FROM maya_skills WHERE enabled = TRUE ORDER BY name');
+    return r.rows.map((x: any) => ({ id: x.id, name: x.name, trigger: x.trigger || '', body: x.body || '' }));
+  } catch { return []; }
+}
+
 // --- Assistant IA « Maya » (DeepSeek, compatible OpenAI) ---
 app.post('/api/ai/chat', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -2868,6 +3176,7 @@ app.post('/api/ai/chat', authenticateToken, async (req: AuthRequest, res: Respon
       .slice(-12);
 
     const b = await loadOpsBoard();
+    const skills = await loadMayaSkills();
     const today = new Date().toISOString().slice(0, 10);
     // semaine ISO courante (pour les commentaires)
     const dd = new Date(); const dz = new Date(Date.UTC(dd.getFullYear(), dd.getMonth(), dd.getDate()));
@@ -2903,6 +3212,9 @@ MODULE QMS (Qualité ISO 13485 / MDR) — tu peux LIRE et AGIR :
 - Lecture : qms_tracking_list(kind, status, q) pour les NC/CAPA/CC (kind='NC'|'CAPA'|'CC', status='OPEN'|'CLOSED') ; qms_risks_list(category, q) registre des risques (category='PRODUIT'|'PROCESS', criticité=occurrence×severity) ; qms_equipment_list(status, q) équipements + calibrations planifiées ; qms_suppliers_list(status, classification, q) fournisseurs ; qms_documents_list(q) documentation contrôlée (lien OneDrive).
 - Action : qms_create_record(kind, description, dueDate?) crée une NC/CAPA/CC (numéro auto, statut OUVERT) ; qms_update_record(kind, extId, status?, dueDate?, description?) met à jour (status='OPEN'|'CLOSED'). Toute action est tracée dans l'audit trail (ALCOA+). Quand tu crées/modifies, confirme avec le numéro (ex. "✅ NC-2026-007 créée"). Si ambigu, demande de préciser. Tu n'inventes jamais un numéro ou un chiffre : si un outil échoue, dis-le.
 
+${skills.length ? `COMPÉTENCES DISPONIBLES (fiches méthode maison) — quand l'une correspond à la demande, APPELLE d'abord charger_competence(nom) pour lire sa méthode, puis applique-la :
+${skills.map(s => `- "${s.name}"${s.trigger ? ` — à utiliser ${s.trigger}` : ''}`).join('\n')}
+` : ''}
 BOARD ACTUEL :
 ${ctx || '(board vide)'}`;
 
@@ -2921,6 +3233,7 @@ ${ctx || '(board vide)'}`;
       { type: 'function', function: { name: 'qms_documents_list', description: 'Rechercher dans la documentation contrôlée QMS (OneDrive).', parameters: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] } } },
       { type: 'function', function: { name: 'qms_create_record', description: 'Créer une non-conformité (NC), CAPA ou Change Control (CC). Numéro auto, statut OUVERT.', parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['NC', 'CAPA', 'CC'] }, description: { type: 'string' }, dueDate: { type: 'string', description: 'échéance AAAA-MM-JJ (optionnel)' } }, required: ['kind', 'description'] } } },
       { type: 'function', function: { name: 'qms_update_record', description: 'Modifier une NC/CAPA/CC existante (statut, échéance, description).', parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['NC', 'CAPA', 'CC'] }, extId: { type: 'string', description: 'n° ex. NC-2026-007' }, status: { type: 'string', enum: ['OPEN', 'CLOSED'] }, dueDate: { type: 'string' }, description: { type: 'string' } }, required: ['kind', 'extId'] } } },
+      { type: 'function', function: { name: 'charger_competence', description: "Charger le contenu d'une fiche méthode (compétence) listée dans COMPÉTENCES DISPONIBLES, pour suivre sa méthode avant de répondre.", parameters: { type: 'object', properties: { nom: { type: 'string', description: 'nom exact de la compétence' } }, required: ['nom'] } } },
     ];
 
     const execTool = async (name: string, a: any): Promise<any> => {
@@ -3024,6 +3337,13 @@ ${ctx || '(board vide)'}`;
           broadcast('qms:changed', {});
           return { ok: true };
         }
+        if (name === 'charger_competence') {
+          const wanted = String(a.nom || '').trim().toLowerCase();
+          const sk = skills.find(s => s.name.trim().toLowerCase() === wanted)
+            || skills.find(s => s.name.trim().toLowerCase().includes(wanted) && wanted.length > 2);
+          if (!sk) return { ok: false, error: 'compétence introuvable', disponibles: skills.map(s => s.name) };
+          return { ok: true, nom: sk.name, contenu: sk.body };
+        }
         return { ok: false, error: 'outil inconnu' };
       } catch (e: any) { return { ok: false, error: String(e.message || e) }; }
     };
@@ -3052,6 +3372,51 @@ ${ctx || '(board vide)'}`;
     console.error('ai chat', e);
     res.status(500).json({ error: 'Erreur serveur' });
   }
+});
+
+// --- Compétences de Maya (fiches méthode éditables) ---
+const mapMayaSkill = (r: any) => ({ id: r.id, name: r.name, trigger: r.trigger || '', body: r.body || '', enabled: !!r.enabled, updatedAt: r.updated_at });
+
+app.get('/api/maya/skills', authenticateToken, async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT * FROM maya_skills ORDER BY name');
+    res.json({ skills: r.rows.map(mapMayaSkill) });
+  } catch (e) { console.error('maya skills list', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.post('/api/maya/skills', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, trigger, body, enabled } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'Nom requis' });
+    const r = await pool.query(
+      'INSERT INTO maya_skills (name, trigger, body, enabled) VALUES ($1,$2,$3,$4) RETURNING *',
+      [String(name).trim(), String(trigger || ''), String(body || ''), enabled !== false]
+    );
+    res.json(mapMayaSkill(r.rows[0]));
+  } catch (e) { console.error('maya skills create', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.patch('/api/maya/skills/:id', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const sets: string[] = []; const v: any[] = []; let i = 1;
+    for (const [k, col] of [['name', 'name'], ['trigger', 'trigger'], ['body', 'body']] as const) {
+      if (req.body?.[k] !== undefined) { sets.push(`${col}=$${i++}`); v.push(String(req.body[k])); }
+    }
+    if (req.body?.enabled !== undefined) { sets.push(`enabled=$${i++}`); v.push(!!req.body.enabled); }
+    if (!sets.length) return res.status(400).json({ error: 'Rien à modifier' });
+    sets.push(`updated_at=CURRENT_TIMESTAMP`);
+    v.push(req.params.id);
+    const r = await pool.query(`UPDATE maya_skills SET ${sets.join(', ')} WHERE id=$${i} RETURNING *`, v);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Compétence introuvable' });
+    res.json(mapMayaSkill(r.rows[0]));
+  } catch (e) { console.error('maya skills update', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.delete('/api/maya/skills/:id', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    await pool.query('DELETE FROM maya_skills WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { console.error('maya skills delete', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // ===================== Mirage (contrôle visuel / inspection des unités) =====================
@@ -3240,6 +3605,84 @@ app.delete('/api/mirage/records/:id', authenticateToken, requireRole('editor'), 
     broadcast('mirage:changed', {});
     res.json({ ok: true });
   } catch (e) { console.error('mirage delete', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// --- Plans d'action Mirage (proposés par l'IA, éditables, suivis) ---
+const mapMirageAction = (r: any) => ({ id: r.id, defaut: r.defaut || '', action: r.action, responsable: r.responsable || '', priorite: r.priorite ?? 2, echeance: r.echeance ? String(r.echeance).slice(0, 10) : null, statut: r.statut || 'à faire', analyse: r.synthese || '', createdBy: r.created_by, createdAt: r.created_at });
+
+app.get('/api/mirage/action-plans', authenticateToken, requireView('mirage'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(`SELECT * FROM mirage_action_plans ORDER BY (statut='fait'), priorite, created_at DESC`);
+    res.json({ plans: r.rows.map(mapMirageAction) });
+  } catch (e) { console.error('mirage action-plans list', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.post('/api/mirage/action-plans', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { defaut, action, responsable, priorite, echeance, statut, analyse } = req.body || {};
+    if (!action || !String(action).trim()) return res.status(400).json({ error: 'Action requise' });
+    const ech = (typeof echeance === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(echeance)) ? echeance : null;
+    const r = await pool.query(
+      `INSERT INTO mirage_action_plans (defaut, action, responsable, priorite, echeance, statut, synthese, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [String(defaut || ''), String(action).trim(), String(responsable || ''), Number(priorite) || 2, ech, String(statut || 'à faire'), String(analyse || ''), req.user?.username || null]
+    );
+    broadcast('mirage:changed', {});
+    res.json(mapMirageAction(r.rows[0]));
+  } catch (e) { console.error('mirage action-plans create', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.patch('/api/mirage/action-plans/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const sets: string[] = []; const v: any[] = []; let i = 1;
+    for (const [k, col] of [['defaut', 'defaut'], ['action', 'action'], ['responsable', 'responsable'], ['statut', 'statut']] as const) {
+      if (req.body?.[k] !== undefined) { sets.push(`${col}=$${i++}`); v.push(String(req.body[k])); }
+    }
+    if (req.body?.priorite !== undefined) { sets.push(`priorite=$${i++}`); v.push(Number(req.body.priorite) || 2); }
+    if (req.body?.echeance !== undefined) { sets.push(`echeance=$${i++}`); v.push((typeof req.body.echeance === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.echeance)) ? req.body.echeance : null); }
+    if (!sets.length) return res.status(400).json({ error: 'Rien à modifier' });
+    sets.push('updated_at=CURRENT_TIMESTAMP'); v.push(req.params.id);
+    const r = await pool.query(`UPDATE mirage_action_plans SET ${sets.join(', ')} WHERE id=$${i} RETURNING *`, v);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Introuvable' });
+    broadcast('mirage:changed', {});
+    res.json(mapMirageAction(r.rows[0]));
+  } catch (e) { console.error('mirage action-plans update', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.delete('/api/mirage/action-plans/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    await pool.query('DELETE FROM mirage_action_plans WHERE id=$1', [req.params.id]);
+    broadcast('mirage:changed', {});
+    res.json({ ok: true });
+  } catch (e) { console.error('mirage action-plans delete', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Génère (sans enregistrer) une analyse + un plan d'action à partir des données Mirage filtrées + une compétence Maya.
+app.post('/api/mirage/action-plan/generate', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const key = process.env.DEEPSEEK_API_KEY;
+    if (!key) return res.status(503).json({ error: "IA non configurée (clé DeepSeek manquante côté serveur)." });
+    const base = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+    const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+    const contexte = String(req.body?.contexte || '').slice(0, 6000);
+    let methode = '';
+    if (req.body?.skillId) {
+      const s = await pool.query('SELECT name, body FROM maya_skills WHERE id=$1 AND enabled=TRUE', [req.body.skillId]);
+      if (s.rows[0]) methode = `\n\nMÉTHODE À SUIVRE (compétence "${s.rows[0].name}") :\n${s.rows[0].body}`;
+    }
+    const system = `Tu es un ingénieur qualité en dispositifs médicaux (ISO 13485). À partir UNIQUEMENT des données de contrôle visuel (Mirage) fournies, produis une analyse factuelle courte puis un plan d'action concret et actionnable. N'invente aucun chiffre ; si une donnée manque, signale-le.${methode}
+Réponds STRICTEMENT en JSON, sans texte hors JSON : {"analyse":"synthèse en quelques phrases","actions":[{"defaut":"type de défaut concerné ou 'général'","action":"action corrective/préventive concrète et mesurable","responsable":"rôle suggéré (ex. Resp. Qualité)","priorite":1}]}. priorite : 1=haute, 2=moyenne, 3=basse. 3 à 6 actions. En français.`;
+    const user = `DONNÉES MIRAGE (périmètre filtré) :\n${contexte || '(aucune donnée transmise)'}`;
+    const r = await fetch(`${base}/chat/completions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, temperature: 0.3, stream: false, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+    });
+    if (!r.ok) { console.error('mirage plan gen', r.status, await r.text().catch(() => '')); return res.status(502).json({ error: 'IA indisponible.' }); }
+    const d: any = await r.json();
+    let parsed: any = null;
+    try { parsed = JSON.parse(d.choices?.[0]?.message?.content || ''); } catch { /* invalide */ }
+    if (!parsed || !Array.isArray(parsed.actions)) return res.status(502).json({ error: 'Réponse IA invalide, réessaie.' });
+    res.json({ analyse: String(parsed.analyse || ''), actions: parsed.actions.slice(0, 12) });
+  } catch (e) { console.error('mirage plan generate', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // ===================== Suivi de rendement de production (depuis un DDL) =====================
@@ -3661,10 +4104,12 @@ function coaEffectiveVerif(r: any): boolean {
 }
 const mapMateriau = (r: any) => ({ id: r.id, code: r.code, libelle: r.libelle, seuilLossDrying: r.seuil_loss_drying, lossDryingApplicable: r.loss_drying_applicable });
 const mapReference = (r: any) => ({ id: r.id, materiauId: r.materiau_id, fournisseur: r.fournisseur, refInterne: r.ref_interne, refClient: r.ref_client });
+// Normalise une colonne DATE en 'AAAA-MM-JJ' (sinon pg renvoie un datetime ISO que <input type="date"> rejette).
+const isoDay = (v: any) => v == null ? null : String(v).slice(0, 10);
 const mapLot = (r: any) => ({
   id: r.id, materiauId: r.materiau_id, materiauCode: r.materiau_code || null, materiauLibelle: r.materiau_libelle || null,
   numeroLot: r.numero_lot, fournisseur: r.fournisseur, referenceInterne: r.reference_interne, referenceClient: r.reference_client,
-  numeroCommande: r.numero_commande, dateCommande: r.date_commande, dateReception: r.date_reception, datePeremption: r.date_peremption,
+  numeroCommande: r.numero_commande, dateCommande: isoDay(r.date_commande), dateReception: isoDay(r.date_reception), datePeremption: isoDay(r.date_peremption),
   quantiteG: r.quantite_g, quantiteUnite: r.quantite_unite || 'g', lossDrying: r.loss_drying, seuilLossDrying: r.seuil_loss_drying ?? null,
   aVerifierManuel: !!r.a_verifier, aVerifier: coaEffectiveVerif(r),
   coaFichier: r.coa_fichier, coaLien: r.coa_lien, hasCoaDoc: !!r.has_doc, hasCoa: !!r.has_doc || !!(r.coa_lien && String(r.coa_lien).trim()),
@@ -5395,6 +5840,16 @@ async function qmsFindItemId(name: string): Promise<string> {
 async function qmsSourceFileBuffer(name: string): Promise<Buffer> {
   return graphDownloadById(await qmsFindItemId(name));
 }
+// Lien SharePoint (webUrl) du fichier de suivi — pour rendre les N° NC/CAPA cliquables.
+async function qmsSourceFileUrl(name: string): Promise<string | null> {
+  try {
+    const driveId = process.env.GRAPH_DRIVE_ID as string;
+    const j = await graphGet(`${GRAPH}/drives/${driveId}/root/search(q='${encodeURIComponent(name)}')?$select=id,name,file,webUrl&$top=50`);
+    const files = (j.value || []).filter((x: any) => x.file);
+    const hit = files.find((x: any) => String(x.name || '').trim() === name.trim()) || files[0];
+    return hit?.webUrl || null;
+  } catch { return null; }
+}
 
 const QMS_SUPPLIER_FILE = process.env.QMS_SUPPLIER_FILE_NAME || 'Supplier Tracking List_260617.xlsx';
 
@@ -5523,6 +5978,7 @@ async function qmsRefreshNc(): Promise<number> {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const ws = wb.Sheets['NC Tracking List'];
   if (!ws) throw new Error('Onglet « NC Tracking List » introuvable');
+  const fileUrl = await qmsSourceFileUrl(QMS_NC_FILE);
   const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
   const seen: string[] = []; let n = 0;
   for (let i = 16; i < aoa.length; i++) {
@@ -5531,11 +5987,11 @@ async function qmsRefreshNc(): Promise<number> {
     const raw = qmsClean(r[2]);
     try {
       await pool.query(
-        `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref)
-         VALUES ('NC',$1,$2,$3,$4,$5,$6,$7,$8)
+        `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref, web_url)
+         VALUES ('NC',$1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (kind, ext_id) DO UPDATE SET description=EXCLUDED.description, status=EXCLUDED.status, raw_status=EXCLUDED.raw_status,
-           opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, imported_at=CURRENT_TIMESTAMP`,
-        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[18]), parseAnyDate(r[21]), qmsClean(r[15])]
+           opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, web_url=EXCLUDED.web_url, imported_at=CURRENT_TIMESTAMP`,
+        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[18]), parseAnyDate(r[21]), qmsClean(r[15]), fileUrl]
       );
       seen.push(extId); n++;
     } catch (e) { console.error(`QMS NC upsert « ${extId} »`, (e as any)?.message || e); }
@@ -5553,6 +6009,7 @@ async function qmsRefreshCapa(): Promise<number> {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const ws = wb.Sheets['CAPA Tracking List'];
   if (!ws) throw new Error('Onglet « CAPA Tracking List » introuvable');
+  const fileUrl = await qmsSourceFileUrl(QMS_CAPA_FILE);
   const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
   const seen: string[] = []; let n = 0;
   for (let i = 16; i < aoa.length; i++) {
@@ -5561,11 +6018,11 @@ async function qmsRefreshCapa(): Promise<number> {
     const raw = qmsClean(r[2]);
     try {
       await pool.query(
-        `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref)
-         VALUES ('CAPA',$1,$2,$3,$4,$5,$6,$7,$8)
+        `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref, web_url)
+         VALUES ('CAPA',$1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (kind, ext_id) DO UPDATE SET description=EXCLUDED.description, status=EXCLUDED.status, raw_status=EXCLUDED.raw_status,
-           opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, imported_at=CURRENT_TIMESTAMP`,
-        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[11]), parseAnyDate(r[19]), qmsClean(r[7])]
+           opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, web_url=EXCLUDED.web_url, imported_at=CURRENT_TIMESTAMP`,
+        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[11]), parseAnyDate(r[19]), qmsClean(r[7]), fileUrl]
       );
       seen.push(extId); n++;
     } catch (e) { console.error(`QMS CAPA upsert « ${extId} »`, (e as any)?.message || e); }

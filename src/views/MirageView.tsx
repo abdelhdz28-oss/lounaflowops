@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../AuthContext';
+import { cn } from '../utils/cn';
 import {
   ResponsiveContainer, LineChart, Line, ComposedChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ReferenceLine, Cell,
 } from 'recharts';
 import {
   Eye, Plus, Upload, Loader2, Trash2, Pencil, X, AlertTriangle,
-  CheckCircle2, ClipboardList, RefreshCw,
+  CheckCircle2, ClipboardList, RefreshCw, Sparkles,
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -108,6 +109,23 @@ export function MirageView() {
   const [extractMsg, setExtractMsg] = useState('');
   const [saving, setSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Plan d'action qualité : proposé par l'IA (via une compétence Maya), éditable puis enregistré/suivi.
+  const [planSkills, setPlanSkills] = useState<{ id: number; name: string }[]>([]);
+  const [planSkillId, setPlanSkillId] = useState('');
+  const [planBusy, setPlanBusy] = useState(false);
+  const [proposal, setProposal] = useState<{ analyse: string; actions: any[] } | null>(null);
+  const [savedPlans, setSavedPlans] = useState<any[]>([]);
+  const loadPlans = async () => {
+    try { const r = await fetch(`${API_URL}/api/mirage/action-plans`, auth); if (r.ok) { const d = await r.json(); setSavedPlans(d.plans || []); } } catch { /* ignore */ }
+  };
+  useEffect(() => {
+    if (!token) return;
+    (async () => {
+      try { const r = await fetch(`${API_URL}/api/maya/skills`, auth); if (r.ok) { const d = await r.json(); setPlanSkills((d.skills || []).filter((s: any) => s.enabled).map((s: any) => ({ id: s.id, name: s.name }))); } } catch { /* ignore */ }
+    })();
+    loadPlans();
+  }, [token]);
 
   const load = async () => {
     setLoading(true); setError('');
@@ -231,6 +249,8 @@ export function MirageView() {
     filtered.forEach(r => (r.defects || []).forEach(d => {
       const key = defectKey(d.type);
       if (!key) return;
+      // F6 : quand des typologies sont filtrées, ne garder que ces défauts dans le Pareto.
+      if (selDefectKeys.size && !selDefectKeys.has(key)) return;
       if (!acc[key]) acc[key] = { type: defectLabel(d.type), count: 0 };
       acc[key].count += Number(d.count) || 0;
     }));
@@ -238,7 +258,33 @@ export function MirageView() {
     const total = rows.reduce((s, x) => s + x.count, 0);
     let cum = 0;
     return rows.map(x => { cum += x.count; return { ...x, cumul: total ? +((cum / total) * 100).toFixed(1) : 0 }; });
-  }, [filtered]);
+  }, [filtered, selDefectKeys]);
+
+  // F6 : quantité de défauts par année × type de produit (segmentée par typologie filtrée).
+  const PRODUCT_COLORS = ['#2563eb', '#0ea5e9', '#f59e0b', '#16a34a', '#dc2626', '#8b5cf6', '#db2777', '#0d9488'];
+  const qtyByYear = useMemo(() => {
+    const productSet = new Set<string>();
+    const byYear = new Map<string, any>();
+    filtered.forEach(r => {
+      let sum = 0;
+      (r.defects || []).forEach(d => {
+        const key = defectKey(d.type);
+        if (!key) return;
+        if (selDefectKeys.size && !selDefectKeys.has(key)) return;
+        sum += Number(d.count) || 0;
+      });
+      if (sum === 0) return;
+      const year = (r.inspection_date || '').slice(0, 4) || '—';
+      const prod = productLabel(r);
+      productSet.add(prod);
+      const row = byYear.get(year) || { annee: year };
+      row[prod] = (row[prod] || 0) + sum;
+      byYear.set(year, row);
+    });
+    const products = [...productSet].sort((a, b) => a.localeCompare(b, 'fr'));
+    const data = [...byYear.values()].sort((a, b) => String(a.annee).localeCompare(String(b.annee)));
+    return { data, products };
+  }, [filtered, selDefectKeys]);
 
   // Tri du tableau (les graphiques restent en ordre chronologique).
   const sorted = useMemo(() => {
@@ -388,6 +434,48 @@ export function MirageView() {
     await load();
   };
 
+  // Résumé des données filtrées transmis à l'IA (aucune donnée hors périmètre).
+  const buildPlanContexte = () => {
+    const L: string[] = [];
+    L.push(`Contrôles retenus : ${kpis.n} · taux de rejet moyen : ${kpis.avg}% · dernier taux : ${kpis.last}% · unités rejetées cumulées : ${kpis.totRej}`);
+    const f: string[] = [];
+    if (selProducts.length) f.push(`produits: ${selProducts.join(', ')}`);
+    if (selYears.length) f.push(`années: ${selYears.join(', ')}`);
+    if (selUnits.length) f.push(`unités: ${selUnits.join(', ')}`);
+    if (selLots.length) f.push(`lots: ${selLots.join(', ')}`);
+    if (selDefects.length) f.push(`typologies: ${selDefects.join(', ')}`);
+    L.push(`Filtres actifs : ${f.length ? f.join(' | ') : 'aucun (toutes les données)'}`);
+    if (pareto.length) { L.push('Pareto des défauts (type : nombre, cumul %) :'); pareto.slice(0, 12).forEach(p => L.push(`  - ${p.type} : ${p.count} (${p.cumul}%)`)); }
+    if (qtyByYear.data.length) {
+      L.push('Défauts par année × type de produit :');
+      qtyByYear.data.forEach((row: any) => { const parts = qtyByYear.products.map(pr => row[pr] ? `${pr}=${row[pr]}` : '').filter(Boolean).join(', '); L.push(`  - ${row.annee} : ${parts}`); });
+    }
+    return L.join('\n');
+  };
+
+  const generatePlan = async () => {
+    if (planBusy) return;
+    setPlanBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/mirage/action-plan/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth.headers }, body: JSON.stringify({ contexte: buildPlanContexte(), skillId: planSkillId ? Number(planSkillId) : undefined }) });
+      if (r.status === 503) { alert("L'analyse IA n'est pas activée : la clé DeepSeek doit être configurée côté serveur."); return; }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Génération impossible, réessaie.'); return; }
+      const d = await r.json();
+      setProposal({ analyse: d.analyse || '', actions: Array.isArray(d.actions) ? d.actions : [] });
+    } catch { alert('Génération impossible (réseau).'); }
+    finally { setPlanBusy(false); }
+  };
+  const editProposal = (idx: number, patch: any) => setProposal(p => p ? { ...p, actions: p.actions.map((a: any, i: number) => i === idx ? { ...a, ...patch } : a) } : p);
+  const saveProposedAction = async (idx: number) => {
+    const a = proposal?.actions[idx]; if (!a) return;
+    const r = await fetch(`${API_URL}/api/mirage/action-plans`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth.headers }, body: JSON.stringify({ defaut: a.defaut || '', action: a.action || '', responsable: a.responsable || '', priorite: a.priorite || 2, analyse: proposal?.analyse || '' }) });
+    if (!r.ok) { alert("Enregistrement impossible."); return; }
+    setProposal(p => p ? { ...p, actions: p.actions.filter((_: any, i: number) => i !== idx) } : p);
+    loadPlans();
+  };
+  const updatePlan = async (id: number, patch: any) => { await fetch(`${API_URL}/api/mirage/action-plans/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...auth.headers }, body: JSON.stringify(patch) }); loadPlans(); };
+  const deletePlan = async (id: number) => { if (!confirm('Supprimer cette action du plan ?')) return; await fetch(`${API_URL}/api/mirage/action-plans/${id}`, { method: 'DELETE', ...auth }); loadPlans(); };
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50 p-6">
       {/* En-tête */}
@@ -505,6 +593,101 @@ export function MirageView() {
                 </ResponsiveContainer>
               )}
             </div>
+          </div>
+
+          {/* F6 : quantité de défauts par année × type de produit */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 mb-6">
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">
+              Quantité de défauts par année × type de produit
+              {selDefects.length > 0 && <span className="ml-2 text-xs font-normal text-slate-400">· typologies : {selDefects.join(', ')}</span>}
+            </h3>
+            {qtyByYear.data.length === 0 ? <Empty text="Aucun défaut détaillé sur le périmètre filtré." /> : (
+              <ResponsiveContainer width="100%" height={300}>
+                <ComposedChart data={qtyByYear.data} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+                  <XAxis dataKey="annee" tick={{ fontSize: 11, fill: CHART.tick }} />
+                  <YAxis tick={{ fontSize: 11, fill: CHART.tick }} width={40} />
+                  <Tooltip />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {qtyByYear.products.map((p, i) => (
+                    <Bar key={p} dataKey={p} name={p} stackId="a" fill={PRODUCT_COLORS[i % PRODUCT_COLORS.length]} radius={[2, 2, 0, 0]} />
+                  ))}
+                </ComposedChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Plan d'action qualité (IA + suivi) */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2"><ClipboardList className="w-4 h-4 text-blue-600" /> Plan d'action qualité</h3>
+              {canEdit && (
+                <div className="flex items-center gap-2">
+                  <select value={planSkillId} onChange={e => setPlanSkillId(e.target.value)} title="Compétence Maya à appliquer" className="text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500 max-w-[220px]">
+                    <option value="">Méthode : par défaut</option>
+                    {planSkills.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <button onClick={generatePlan} disabled={planBusy} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-60">
+                    {planBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />} {planBusy ? 'Analyse…' : 'Générer un plan (IA)'}
+                  </button>
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-slate-400 mb-3">L'IA analyse les données actuellement filtrées et propose un plan d'action ; chaque action peut être enregistrée dans le suivi ci-dessous.</p>
+
+            {proposal && (
+              <div className="border border-blue-200 bg-blue-50/40 rounded-lg p-3 mb-4">
+                {proposal.analyse && <div className="text-sm text-slate-700 mb-3 whitespace-pre-wrap"><span className="font-semibold">Analyse : </span>{proposal.analyse}</div>}
+                {proposal.actions.length === 0 ? <div className="text-sm text-slate-400">Aucune action proposée.</div> : (
+                  <div className="space-y-2">
+                    {proposal.actions.map((a: any, i: number) => (
+                      <div key={i} className="flex flex-wrap items-center gap-2 bg-white border border-slate-200 rounded-lg p-2">
+                        <select value={a.priorite || 2} onChange={e => editProposal(i, { priorite: Number(e.target.value) })} className="text-xs border border-slate-200 rounded px-1 py-1" title="Priorité">
+                          <option value={1}>Haute</option><option value={2}>Moyenne</option><option value={3}>Basse</option>
+                        </select>
+                        <input value={a.defaut || ''} onChange={e => editProposal(i, { defaut: e.target.value })} placeholder="Défaut" className="w-32 text-xs border border-slate-200 rounded px-2 py-1" />
+                        <input value={a.action || ''} onChange={e => editProposal(i, { action: e.target.value })} placeholder="Action" className="flex-1 min-w-[200px] text-sm border border-slate-200 rounded px-2 py-1" />
+                        <input value={a.responsable || ''} onChange={e => editProposal(i, { responsable: e.target.value })} placeholder="Responsable" className="w-32 text-xs border border-slate-200 rounded px-2 py-1" />
+                        <button onClick={() => saveProposedAction(i)} className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700"><CheckCircle2 className="w-3.5 h-3.5" /> Enregistrer</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="flex justify-end mt-2"><button onClick={() => setProposal(null)} className="text-xs text-slate-500 hover:underline">Fermer la proposition</button></div>
+              </div>
+            )}
+
+            {savedPlans.length === 0 ? (
+              <div className="text-sm text-slate-400 py-2">Aucune action enregistrée pour l'instant.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b border-slate-200">
+                    <th className="px-2 py-2 w-24">Priorité</th><th className="px-2 py-2 w-32">Défaut</th><th className="px-2 py-2">Action</th><th className="px-2 py-2 w-32">Responsable</th><th className="px-2 py-2 w-28">Statut</th><th className="px-2 py-2 w-8"></th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {savedPlans.map((p: any) => (
+                      <tr key={p.id} className={cn('hover:bg-slate-50', p.statut === 'fait' && 'opacity-60')}>
+                        <td className="px-2 py-1.5">
+                          <span className={cn('text-[10px] font-semibold rounded px-1.5 py-0.5', p.priorite === 1 ? 'bg-red-100 text-red-700' : p.priorite === 3 ? 'bg-slate-100 text-slate-500' : 'bg-amber-100 text-amber-700')}>{p.priorite === 1 ? 'Haute' : p.priorite === 3 ? 'Basse' : 'Moyenne'}</span>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600">{p.defaut || '—'}</td>
+                        <td className="px-2 py-1.5 text-slate-700">{p.action}</td>
+                        <td className="px-2 py-1.5 text-slate-600">{p.responsable || '—'}</td>
+                        <td className="px-2 py-1.5">
+                          {canEdit ? (
+                            <select value={p.statut} onChange={e => updatePlan(p.id, { statut: e.target.value })} className="text-xs border border-slate-200 rounded px-1 py-1">
+                              <option value="à faire">À faire</option><option value="en cours">En cours</option><option value="fait">Fait</option>
+                            </select>
+                          ) : <span className="text-xs text-slate-500">{p.statut}</span>}
+                        </td>
+                        <td className="px-2 py-1.5 text-right">{canEdit && <button onClick={() => deletePlan(p.id)} className="text-slate-300 hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           {/* Tableau */}

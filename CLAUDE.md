@@ -36,5 +36,24 @@ règles données/calculs, déploiement selon risque, compte-rendu en 5 lignes.
 - Changements chirurgicaux : ne toucher que ce qui est demandé.
 
 ## Autres copies (ne pas confondre)
-- Ce dépôt (`~/Projects/lounaflow-v2-ref`) est LE dépôt actif.
+- Ce dépôt (`~/claude/Projects/lounaflow-v2-ref`) est LE dépôt actif.
 - `~/Projects/Lounaflow-ops`, `~/lounaflow-ops`, `~/Projects/lounaflow-prod-data` : anciennes versions ou données — ne pas y toucher sans demande explicite.
+
+## Agentic OS — chef d'orchestre (routage)
+Quand Abdel formule une demande, se comporter comme le chef d'orchestre :
+1. Suivre D'ABORD la méthode obligatoire (skill `lounaflow-workflow`).
+2. Identifier l'intention et charger l'agent adapté depuis `agents/`.
+3. Lire la mémoire utile dans `data/` (backlog, décisions) avant d'agir.
+4. En fin de tâche : compte-rendu 5 lignes + journaliser dans `data/journal/`.
+
+### Registre des agents
+| Agent | Rôle | Déclencheurs |
+|---|---|---|
+| @dev (`agents/dev.md`) | Code, build, déploiement Railway | ajoute, corrige, déploie, bug |
+| @analyste (`agents/analyste.md`) | Données, calculs, COGS, forecast, QMS | analyse, calcule, chiffres, rapport |
+| @redacteur (`agents/redacteur.md`) | Synthèses, notes, comptes-rendus, doc | rédige, résume, note, explique |
+
+### Commandes
+- `/point-lounaflow` — point du jour (prod, git, backlog)
+- `/verif-deploiement` — checklist avant de déployer
+- `/decision` — enregistrer une décision importante

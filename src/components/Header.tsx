@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Plus, LogOut, User, Shield, Edit3, Eye, Maximize2, Minimize2 } from 'lucide-react';
+import { Download, Plus, LogOut, User, Shield, Edit3, Eye, Maximize2, Minimize2, Sparkles } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
 import { exportCurrentView } from '../utils/export';
@@ -11,6 +11,7 @@ interface HeaderProps {
   onNewBatch: () => void;
   presentation: boolean;
   onTogglePresentation: () => void;
+  onOpenMaya: () => void;
 }
 
 const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
@@ -19,7 +20,7 @@ const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: 
   viewer: { label: 'Lecture seule', icon: <Eye className="w-3 h-3" />, color: 'text-slate-600 bg-slate-50 border-slate-200' },
 };
 
-export function Header({ title, currentView, onNewBatch, presentation, onTogglePresentation }: HeaderProps) {
+export function Header({ title, currentView, onNewBatch, presentation, onTogglePresentation, onOpenMaya }: HeaderProps) {
   const { batches, deliveries, fluxConfig } = useAppContext();
   const { user, logout, canEdit } = useAuth();
 
@@ -34,6 +35,14 @@ export function Header({ title, currentView, onNewBatch, presentation, onToggleP
       <h1 className="text-lg font-semibold text-slate-800">{title}</h1>
 
       <div className="flex items-center gap-4">
+        <button
+          onClick={onOpenMaya}
+          title="Parler à Maya, ton assistante"
+          className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-500 to-blue-600 rounded-md hover:from-indigo-600 hover:to-blue-700 transition-colors shadow-sm"
+        >
+          <Sparkles className="w-4 h-4" /> Maya
+        </button>
+
         {user && roleInfo && (
           <div className="flex items-center gap-3 mr-2">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm">

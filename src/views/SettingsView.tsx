@@ -4,9 +4,14 @@ import { cn } from '../utils/cn';
 import { FluxConfig, SampleConfig, ProcessStage, ProductCatalogEntry } from '../types';
 import { SAMPLE_TESTS, PROCESS_STAGES, DEFAULT_SAMPLE_CONFIG } from '../constants';
 import { Plus, Trash2 } from 'lucide-react';
+import { MayaSkillsPanel } from '../components/MayaSkillsPanel';
 
 // Étapes de prélèvement sélectionnables pour les tests labo
 const SAMPLE_STAGE_OPTIONS = PROCESS_STAGES.filter(p => p.value !== 'EXPEDIE');
+
+// F9 : étapes par défaut d'une carte lead time créée à la volée (éditables ensuite).
+const DEFAULT_LEADTIME_STEPS = ['Nettoyage', 'Formulation', 'Mirage', 'Conditionnement', 'Libération'];
+const fluxSlug = (s: string) => s.trim().replace(/\s+/g, '_').replace(/[^0-9A-Za-zÀ-ÿ_-]/g, '') || 'Produit';
 
 export function SettingsView() {
   const { fluxConfig, sampleConfig, samplePartners, productCatalog, updateSettings, updateSampleConfig, updateSamplePartners, updateProductCatalog, resetData } = useAppContext();
@@ -15,6 +20,8 @@ export function SettingsView() {
   const [localPartners, setLocalPartners] = useState<string[]>([]);
   const [newPartner, setNewPartner] = useState('');
   const [localCatalog, setLocalCatalog] = useState<ProductCatalogEntry[]>([]);
+  const [leadTimeFor, setLeadTimeFor] = useState<Set<number>>(new Set());  // F9 : lignes catalogue à doter d'une carte lead time
+  const [highlightFlux, setHighlightFlux] = useState<string | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPassword, setResetPassword] = useState('');
 
@@ -76,11 +83,40 @@ export function SettingsView() {
 
   const handleDeleteCatalogRow = (idx: number) => {
     setLocalCatalog(prev => prev.filter((_, i) => i !== idx));
+    setLeadTimeFor(prev => { const n = new Set<number>(); prev.forEach(i => { if (i < idx) n.add(i); else if (i > idx) n.add(i - 1); }); return n; });
+  };
+
+  const toggleLeadTime = (idx: number) => {
+    setLeadTimeFor(prev => { const n = new Set(prev); n.has(idx) ? n.delete(idx) : n.add(idx); return n; });
   };
 
   const handleSaveCatalog = async () => {
     const ok = await updateProductCatalog(localCatalog);
-    alert(ok ? 'Catalogue produits enregistré !' : 'Erreur lors de l\'enregistrement.');
+    if (!ok) { alert('Erreur lors de l\'enregistrement.'); return; }
+    // F9 : créer les cartes lead time demandées pour les produits cochés.
+    const wanted = [...leadTimeFor].map(idx => localCatalog[idx]).filter(Boolean)
+      .filter(e => (e.name || e.type || e.ref || '').trim());
+    if (wanted.length === 0) { alert('Catalogue produits enregistré !'); return; }
+    const nextFlux: Record<string, FluxConfig> = { ...localConfig };
+    const created: string[] = [];
+    let skipped = 0;
+    for (const e of wanted) {
+      const label = (e.name || e.type || e.ref).trim();
+      if (Object.values(nextFlux).some(f => f.name.trim().toLowerCase() === label.toLowerCase())) { skipped++; continue; }
+      let key = fluxSlug(label); let n = 2;
+      while (nextFlux[key]) { key = `${fluxSlug(label)}_${n}`; n++; }
+      nextFlux[key] = { name: label, steps: [...DEFAULT_LEADTIME_STEPS], durations: Object.fromEntries(DEFAULT_LEADTIME_STEPS.map(s => [s, 1])) };
+      created.push(key);
+    }
+    setLeadTimeFor(new Set());
+    if (created.length === 0) { alert(`Catalogue enregistré. Carte(s) lead time déjà existante(s) pour ce(s) produit(s).`); return; }
+    const ok2 = await updateSettings(nextFlux);
+    if (ok2) {
+      setHighlightFlux(created[0]);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    const suffix = skipped ? ` (${skipped} déjà existante(s))` : '';
+    alert(ok2 ? `Catalogue enregistré. ${created.length} carte(s) lead time créée(s)${suffix}.` : 'Catalogue enregistré, mais échec de création des cartes lead time.');
   };
 
   const handleAddPartner = () => {
@@ -238,6 +274,29 @@ export function SettingsView() {
     alert('Paramètres enregistrés !');
   };
 
+  // Génère une carte lead time pour chaque produit du catalogue enregistré qui n'en a pas encore.
+  const handleGenerateLeadtimesFromCatalog = async () => {
+    const source = productCatalog || [];
+    if (source.length === 0) { alert('Le catalogue produits est vide. Ajoute d\'abord des produits (et enregistre-les).'); return; }
+    const nextFlux: Record<string, FluxConfig> = { ...localConfig };
+    const created: string[] = [];
+    let skipped = 0;
+    for (const e of source) {
+      const label = (e.name || e.type || e.ref || '').trim();
+      if (!label) continue;
+      if (Object.values(nextFlux).some(f => f.name.trim().toLowerCase() === label.toLowerCase())) { skipped++; continue; }
+      let key = fluxSlug(label); let n = 2;
+      while (nextFlux[key]) { key = `${fluxSlug(label)}_${n}`; n++; }
+      nextFlux[key] = { name: label, steps: [...DEFAULT_LEADTIME_STEPS], durations: Object.fromEntries(DEFAULT_LEADTIME_STEPS.map(s => [s, 1])) };
+      created.push(key);
+    }
+    if (created.length === 0) { alert('Toutes les cartes lead time existent déjà pour les produits du catalogue.'); return; }
+    if (!confirm(`Créer ${created.length} carte(s) lead time depuis le catalogue produits ?${skipped ? ` (${skipped} produit(s) ont déjà une carte)` : ''}`)) return;
+    const ok = await updateSettings(nextFlux);
+    if (ok) { setHighlightFlux(created[0]); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    alert(ok ? `${created.length} carte(s) lead time créée(s) depuis le catalogue.` : 'Échec de la création.');
+  };
+
   const handleReset = async () => {
     const success = await resetData(resetPassword);
     if (success) {
@@ -251,14 +310,23 @@ export function SettingsView() {
 
   return (
     <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-wrap justify-between items-center gap-2 mb-6">
         <h3 className="text-lg font-semibold text-slate-800">Configuration des Produits & Leadtimes</h3>
-        <button 
-          onClick={handleSave}
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
-        >
-          Enregistrer les modifications
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleGenerateLeadtimesFromCatalog}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 transition-colors"
+            title="Créer une carte lead time pour chaque produit du catalogue qui n'en a pas encore"
+          >
+            <Plus className="w-4 h-4" /> Générer depuis le catalogue produits
+          </button>
+          <button
+            onClick={handleSave}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
+          >
+            Enregistrer les modifications
+          </button>
+        </div>
       </div>
       
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
@@ -270,8 +338,8 @@ export function SettingsView() {
           if (totalWeeks > 10) totalColor = 'text-red-600';
 
           return (
-            <div key={key} className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col shadow-sm">
-              <h4 className="text-base font-bold text-blue-600 mb-4">{flux.name}</h4>
+            <div key={key} className={cn("bg-white border rounded-xl p-6 flex flex-col shadow-sm transition-colors", highlightFlux === key ? "border-blue-500 ring-2 ring-blue-300" : "border-slate-200")}>
+              <h4 className="text-base font-bold text-blue-600 mb-4">{flux.name}{highlightFlux === key && <span className="ml-2 text-xs font-normal text-blue-500">· nouvelle carte</span>}</h4>
               
               <div className="flex-1 flex flex-col gap-3 mb-6">
                 {flux.steps.map((step, idx) => {
@@ -446,6 +514,7 @@ export function SettingsView() {
         </div>
         <p className="text-sm text-slate-500 mb-4">
           Types de produits, références et variantes de conditionnement. Utilisé pour l'auto-remplissage des fiches lot et le calcul du rendement de production.
+          Cochez « Carte lead time » sur un produit pour créer automatiquement sa fiche de délais (en haut de page) à l'enregistrement.
         </p>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -457,13 +526,14 @@ export function SettingsView() {
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Cond./boîte</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contenant</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Volume contenant (mL)</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Carte lead time</th>
                 <th className="py-2 px-3"></th>
               </tr>
             </thead>
             <tbody>
               {localCatalog.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-3 px-3 text-sm text-slate-400 italic">Aucun produit configuré.</td>
+                  <td colSpan={8} className="py-3 px-3 text-sm text-slate-400 italic">Aucun produit configuré.</td>
                 </tr>
               )}
               {localCatalog.map((entry, idx) => (
@@ -521,6 +591,15 @@ export function SettingsView() {
                       className="w-24 px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
                     />
                   </td>
+                  <td className="py-2 px-3 text-center">
+                    <input
+                      type="checkbox"
+                      checked={leadTimeFor.has(idx)}
+                      onChange={() => toggleLeadTime(idx)}
+                      title="Créer une carte lead time associée à ce produit lors de l'enregistrement"
+                      className="h-4 w-4 cursor-pointer"
+                    />
+                  </td>
                   <td className="py-2 px-3">
                     <button
                       type="button"
@@ -545,6 +624,8 @@ export function SettingsView() {
           Ajouter un type de produit
         </button>
       </div>
+
+      <MayaSkillsPanel />
 
       <div className="bg-red-50 border border-red-200 rounded-xl p-6 shadow-sm">
         <h4 className="text-base font-bold text-red-600 mb-2">Zone de danger</h4>

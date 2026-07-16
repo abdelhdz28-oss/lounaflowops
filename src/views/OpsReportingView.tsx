@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
-import { Plus, Trash2, FileText, Mail, History, X, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
-import { MayaChat } from '../components/MayaChat';
+import { Plus, Trash2, FileText, Mail, History, X, ChevronRight, ChevronDown, ChevronUp, Check, Sparkles } from 'lucide-react';
 import { formatDate } from '../constants';
 
 // Lundi (ISO) d'une chaîne semaine "2026-W26" -> "2026-06-22"
@@ -42,12 +41,13 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 function addDays(iso: string, n: number) { const d = new Date(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
 
 interface Board {
-  projects: any[]; milestones: any[]; deliverables: any[]; weeklyComments: any[]; deadlineHistory: any[];
+  projects: any[]; milestones: any[]; deliverables: any[]; weeklyComments: any[]; deadlineHistory: any[]; synthesisNotes?: any[];
 }
 
 export function OpsReportingView() {
-  const { token, socket, canEdit } = useAuth();
-  const [board, setBoard] = useState<Board>({ projects: [], milestones: [], deliverables: [], weeklyComments: [], deadlineHistory: [] });
+  const { token, socket, canEdit, isAdmin } = useAuth();
+  const [board, setBoard] = useState<Board>({ projects: [], milestones: [], deliverables: [], weeklyComments: [], deadlineHistory: [], synthesisNotes: [] });
+  const noteRef = useRef<HTMLTextAreaElement>(null);
   const [historyItem, setHistoryItem] = useState<{ type: string; id: string; title: string } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [trend, setTrend] = useState<any>(null);   // chiffres clés de la semaine précédente (tendance N vs N-1)
@@ -112,6 +112,68 @@ export function OpsReportingView() {
 
   const commentOf = (type: string, id: string) =>
     board.weeklyComments.find(c => c.entityType === type && c.entityId === id && c.isoWeek === week)?.text || '';
+  const commentStatutOf = (type: string, id: string) =>
+    board.weeklyComments.find(c => c.entityType === type && c.entityId === id && c.isoWeek === week)?.statut || 'ouvert';
+
+  // F2 — Note de synthèse de la semaine (corps éditable + garde-fou de concurrence par version).
+  const curNote = (board.synthesisNotes || []).find((x: any) => x.isoWeek === week) || { corps: '', version: 0, updatedBy: null, updatedAt: null };
+  const saveNote = async () => {
+    const corps = noteRef.current?.value ?? '';
+    const r = await fetch(`${API_URL}/api/ops/synthesis`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ isoWeek: week, corps, version: curNote.version }),
+    });
+    if (r.status === 409) { alert("La note a été modifiée entre-temps par quelqu'un d'autre. Je recharge la dernière version — reporte tes ajouts si besoin."); load(); return; }
+    if (!r.ok) { alert("Enregistrement de la note impossible."); return; }
+    load();
+  };
+  const integrateComment = (type: string, id: string) => api('POST', '/api/ops/comments/integrate', { entityType: type, entityId: id, isoWeek: week });
+
+  // F4 — Bilan IA : génération (anti double-clic), édition, puis enregistrement.
+  const [bilan, setBilan] = useState<any | null>(null);
+  const [bilanOpen, setBilanOpen] = useState(false);
+  const [bilanBusy, setBilanBusy] = useState(false);
+  const generateBilan = async () => {
+    if (bilanBusy) return;
+    setBilanBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/ops/ia-bilan/generate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ isoWeek: week }),
+      });
+      if (r.status === 503) { alert("Le bilan IA n'est pas encore activé : la clé DeepSeek doit être configurée côté serveur."); return; }
+      if (!r.ok) { alert("Le bilan IA n'a pas pu être généré. Réessaie dans un instant."); return; }
+      setBilan(await r.json());
+      setBilanOpen(true);
+    } catch { alert("Le bilan IA n'a pas pu être généré (réseau)."); }
+    finally { setBilanBusy(false); }
+  };
+  // Historique des bilans enregistrés (horodaté) : liste + réouverture d'une version passée.
+  const [bilanHistory, setBilanHistory] = useState<any[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const loadBilanHistory = useCallback(async () => {
+    if (!token) return;
+    try { const r = await fetch(`${API_URL}/api/ops/ia-bilan/history`, { headers: { Authorization: `Bearer ${token}` } }); if (r.ok) { const d = await r.json(); setBilanHistory(d.history || []); } } catch { /* ignore */ }
+  }, [token]);
+  useEffect(() => { loadBilanHistory(); }, [loadBilanHistory]);
+  const openBilanFromHistory = async (id: number) => {
+    try {
+      const r = await fetch(`${API_URL}/api/ops/ia-bilan/history/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) { alert("Impossible d'ouvrir ce bilan."); return; }
+      const d = await r.json();
+      setBilan(d.contenu); setBilanOpen(true);
+    } catch { alert("Impossible d'ouvrir ce bilan (réseau)."); }
+  };
+
+  const saveBilan = async () => {
+    const r = await fetch(`${API_URL}/api/ops/ia-bilan`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ isoWeek: week, contenu: bilan }),
+    });
+    if (!r.ok) { alert("Enregistrement du bilan impossible."); return; }
+    setBilanOpen(false);
+    loadBilanHistory();
+  };
 
   // Glissement (report d'échéance vers le futur) propre à une entité — alimente le badge de ligne.
   const slipInfo = (type: string, id: string, current: string | null) => {
@@ -423,11 +485,57 @@ Abdel`;
             <Mail className="w-4 h-4" /> Envoyer le débrief par email
           </button>
           {canEdit && (
+            <button onClick={generateBilan} disabled={bilanBusy} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-60">
+              <Sparkles className="w-4 h-4" /> {bilanBusy ? 'Génération…' : 'Générer le bilan'}
+            </button>
+          )}
+          <button onClick={() => setHistoryOpen(o => !o)} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50">
+            <History className="w-4 h-4" /> Historique des bilans {bilanHistory.length > 0 && <span className="text-xs text-slate-400">· {bilanHistory.length}</span>}
+          </button>
+          {canEdit && (
             <button onClick={() => api('POST', '/api/ops/projects', { name: 'Nouveau projet' })} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">
               <Plus className="w-4 h-4" /> Projet
             </button>
           )}
         </div>
+      </div>
+
+      {historyOpen && (
+        <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 mb-5">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-2"><History className="w-4 h-4 text-slate-500" /> Historique des bilans générés</h4>
+            <button onClick={() => setHistoryOpen(false)} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+          </div>
+          {bilanHistory.length === 0 ? (
+            <p className="text-sm text-slate-400 py-2">Aucun bilan enregistré pour l'instant. Génère un bilan puis clique « Enregistrer le bilan » — il apparaîtra ici, daté.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {bilanHistory.map((h: any) => (
+                <div key={h.id} className="flex items-center justify-between gap-2 py-2">
+                  <div className="text-sm text-slate-700">
+                    <span className="font-medium">Semaine {h.isoWeek}</span>
+                    <span className="text-slate-400 ml-2">{new Date(h.createdAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}</span>
+                    {h.createdBy && <span className="text-xs text-slate-400 ml-2">· {h.createdBy}</span>}
+                  </div>
+                  <button onClick={() => openBilanFromHistory(h.id)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-lg hover:bg-violet-100">
+                    <Sparkles className="w-3.5 h-3.5" /> Ouvrir (envoyer / PDF)
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-4 mb-5">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-slate-800">Note de synthèse <span className="text-xs font-normal text-slate-400">· {weekLabel}</span></h3>
+          {curNote.updatedBy && <span className="text-[11px] text-slate-400">Dernière modif : {curNote.updatedBy}{curNote.updatedAt ? ` · ${formatDate(String(curNote.updatedAt).slice(0, 10))}` : ''}</span>}
+        </div>
+        <textarea ref={noteRef} key={`note-${week}-${curNote.version}`} defaultValue={curNote.corps} disabled={!canEdit}
+          placeholder="Corps du reporting de la semaine… (les commentaires « Intégrer » viennent s'ajouter ici)"
+          className="w-full h-32 text-sm border border-slate-200 rounded-lg p-2 outline-none focus:border-blue-400 resize-y text-slate-700" />
+        {canEdit && <div className="flex justify-end mt-2"><button onClick={saveNote} className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">Enregistrer la note</button></div>}
       </div>
 
       <div className="space-y-5">
@@ -486,6 +594,8 @@ Abdel`;
                         title={m.title} status={m.status} deadline={m.deadline}
                         slip={slipInfo('milestone', m.id, m.deadline)}
                         comment={commentOf('milestone', m.id)}
+                        commentStatut={commentStatutOf('milestone', m.id)}
+                        onIntegrate={canEdit ? () => integrateComment('milestone', m.id) : undefined}
                         onTitle={v => api('PATCH', `/api/ops/milestones/${m.id}`, { title: v })}
                         onStatus={v => api('PATCH', `/api/ops/milestones/${m.id}`, { status: v })}
                         onDeadline={(v, isSlip) => api('PATCH', `/api/ops/milestones/${m.id}`, { deadline: v, deadlineIsSlip: isSlip })}
@@ -494,18 +604,25 @@ Abdel`;
                         onDelete={() => confirm('Supprimer ce milestone et ses deliverables ?') && api('DELETE', `/api/ops/milestones/${m.id}`)}
                         extra={canEdit && <button onClick={() => api('POST', '/api/ops/deliverables', { milestoneId: m.id, title: 'Nouveau deliverable' })} className="text-[10px] px-1.5 py-0.5 text-blue-600 hover:bg-blue-50 rounded ml-1">+ livr.</button>}
                       />
-                      {!isCol && md.map(d => (
+                      {!isCol && md.map((d, di) => (
                         <React.Fragment key={d.id}><Row
                           canEdit={canEdit} indent={1}
                           title={d.title} status={d.status} deadline={d.deadline}
                           slip={slipInfo('deliverable', d.id, d.deadline)}
                           comment={commentOf('deliverable', d.id)}
+                          commentStatut={commentStatutOf('deliverable', d.id)}
+                          onIntegrate={canEdit ? () => integrateComment('deliverable', d.id) : undefined}
                           onTitle={v => api('PATCH', `/api/ops/deliverables/${d.id}`, { title: v })}
                           onStatus={v => api('PATCH', `/api/ops/deliverables/${d.id}`, { status: v })}
                           onDeadline={(v, isSlip) => api('PATCH', `/api/ops/deliverables/${d.id}`, { deadline: v, deadlineIsSlip: isSlip })}
                           onComment={v => api('PUT', '/api/ops/comments', { entityType: 'deliverable', entityId: d.id, isoWeek: week, text: v })}
                           onHistory={() => setHistoryItem({ type: 'deliverable', id: d.id, title: d.title })}
                           onDelete={() => api('DELETE', `/api/ops/deliverables/${d.id}`)}
+                          onMoveUp={isAdmin ? () => api('POST', `/api/ops/deliverables/${d.id}/move`, { direction: 'up' }) : undefined}
+                          onMoveDown={isAdmin ? () => api('POST', `/api/ops/deliverables/${d.id}/move`, { direction: 'down' }) : undefined}
+                          canMoveUp={di > 0} canMoveDown={di < md.length - 1}
+                          onSetPosition={isAdmin ? (n) => api('POST', `/api/ops/deliverables/${d.id}/move`, { position: n }) : undefined}
+                          position={di + 1} posMax={md.length}
                         /></React.Fragment>
                       ))}
                     </React.Fragment>
@@ -546,7 +663,124 @@ Abdel`;
         </div>
       )}
 
-      <MayaChat />
+      {bilanOpen && bilan && <BilanEditor bilan={bilan} setBilan={setBilan} week={week} onClose={() => setBilanOpen(false)} onSave={saveBilan} />}
+
+    </div>
+  );
+}
+
+// F4 — Édition du bilan IA avant enregistrement (bilan par projet + objectifs SMART).
+function BilanEditor({ bilan, setBilan, week, onClose, onSave }: { bilan: any; setBilan: (b: any) => void; week: string; onClose: () => void; onSave: () => void }) {
+  const upd = (fn: (b: any) => void) => { const c = JSON.parse(JSON.stringify(bilan)); fn(c); setBilan(c); };
+  const lines = (arr: string[]) => (arr || []).join('\n');
+  const toArr = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
+  const [sending, setSending] = useState(false);
+
+  // Bilan en texte simple (corps de l'e-mail) et en HTML (source du PDF).
+  const buildText = () => {
+    let t = `BILAN HEBDOMADAIRE — Semaine ${week}\n`;
+    t += `\n=== BILAN PAR PROJET ===\n`;
+    for (const b of bilan.bilan || []) {
+      t += `\n▸ ${b.projet || 'Projet'}\n`;
+      if (b.avancement) t += `Avancement : ${b.avancement}\n`;
+      if ((b.faits_marquants || []).length) t += `Faits marquants :\n${(b.faits_marquants || []).map((x: string) => `  - ${x}`).join('\n')}\n`;
+      if ((b.risques_retards || []).length) t += `Risques / retards :\n${(b.risques_retards || []).map((x: string) => `  - ${x}`).join('\n')}\n`;
+    }
+    t += `\n=== OBJECTIFS DE LA SEMAINE ===\n`;
+    for (const g of bilan.objectifs_hebdo || []) {
+      t += `\n▸ ${g.projet || 'Projet'}\n`;
+      for (const o of g.objectifs || []) {
+        t += `  [P${o.priorite || 1}] ${o.intitule || ''}${o.critere_succes ? ` — succès : ${o.critere_succes}` : ''}\n`;
+        if ((o.actions_liees || []).length) t += `        liés : ${(o.actions_liees || []).join(', ')}\n`;
+      }
+    }
+    return t;
+  };
+  const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const buildHtml = () => {
+    const projBloc = (bilan.bilan || []).map((b: any) => `
+      <div style="margin:0 0 14px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:8px">
+        <div style="font-weight:700;color:#1e293b;font-size:14px">${esc(b.projet)}</div>
+        ${b.avancement ? `<div style="margin-top:4px"><b>Avancement :</b> ${esc(b.avancement)}</div>` : ''}
+        ${(b.faits_marquants || []).length ? `<div style="margin-top:4px"><b>Faits marquants</b><ul style="margin:2px 0 0 18px">${(b.faits_marquants || []).map((x: string) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+        ${(b.risques_retards || []).length ? `<div style="margin-top:4px;color:#b91c1c"><b>Risques / retards</b><ul style="margin:2px 0 0 18px">${(b.risques_retards || []).map((x: string) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      </div>`).join('');
+    const objBloc = (bilan.objectifs_hebdo || []).map((g: any) => `
+      <div style="margin:0 0 14px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:8px">
+        <div style="font-weight:700;color:#1e293b;font-size:14px">${esc(g.projet)}</div>
+        <ul style="margin:4px 0 0 18px">${(g.objectifs || []).map((o: any) => `<li><b>P${esc(o.priorite || 1)}</b> ${esc(o.intitule)}${o.critere_succes ? ` <i>(succès : ${esc(o.critere_succes)})</i>` : ''}${(o.actions_liees || []).length ? `<br><span style="color:#64748b;font-size:12px">liés : ${esc((o.actions_liees || []).join(', '))}</span>` : ''}</li>`).join('')}</ul>
+      </div>`).join('');
+    return `<div style="font-family:Arial,sans-serif;color:#334155;font-size:13px;padding:8px">
+      <h2 style="color:#6d28d9;margin:0 0 4px">Bilan hebdomadaire</h2>
+      <div style="color:#64748b;margin:0 0 14px">Semaine ${esc(week)}</div>
+      <h3 style="color:#1e293b;border-bottom:2px solid #ede9fe;padding-bottom:3px">Bilan par projet</h3>${projBloc}
+      <h3 style="color:#1e293b;border-bottom:2px solid #ede9fe;padding-bottom:3px">Objectifs de la semaine</h3>${objBloc}
+    </div>`;
+  };
+  const downloadPdf = async () => {
+    setSending(true);
+    try {
+      const html2pdf: any = (await import('html2pdf.js')).default;
+      const opt: any = { margin: 8, filename: `Bilan-${week}.pdf`, image: { type: 'jpeg', quality: 0.8 }, html2canvas: { scale: 1.5 }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true } };
+      await html2pdf().set(opt).from(buildHtml(), 'string').save();
+    } catch { alert('Génération du PDF impossible.'); }
+    finally { setSending(false); }
+  };
+  const openEmail = () => {
+    let body = buildText();
+    if (body.length > 1800) body = body.slice(0, 1800) + '\n\n… (bilan complet dans le PDF joint)';
+    window.location.href = `mailto:?subject=${encodeURIComponent(`Bilan hebdomadaire — Semaine ${week}`)}&body=${encodeURIComponent(body)}`;
+  };
+  const sendBilan = async () => { await downloadPdf(); openEmail(); };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <h4 className="font-semibold text-slate-800 text-sm flex items-center gap-2"><Sparkles className="w-4 h-4 text-violet-600" /> Bilan IA — modifiable avant enregistrement</h4>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-5">
+          <div>
+            <div className="text-xs font-semibold text-slate-500 uppercase mb-2">Bilan par projet</div>
+            {(bilan.bilan || []).map((b: any, i: number) => (
+              <div key={i} className="border border-slate-200 rounded-lg p-3 mb-3">
+                <input value={b.projet || ''} onChange={e => upd(c => { c.bilan[i].projet = e.target.value; })} className="font-semibold text-slate-800 w-full mb-2 outline-none border-b border-transparent focus:border-slate-300" />
+                <label className="text-[11px] text-slate-500">Avancement</label>
+                <textarea value={b.avancement || ''} onChange={e => upd(c => { c.bilan[i].avancement = e.target.value; })} className="w-full text-sm border border-slate-200 rounded p-2 mb-2 h-16 resize-y" />
+                <label className="text-[11px] text-slate-500">Faits marquants (un par ligne)</label>
+                <textarea value={lines(b.faits_marquants)} onChange={e => upd(c => { c.bilan[i].faits_marquants = toArr(e.target.value); })} className="w-full text-sm border border-slate-200 rounded p-2 mb-2 h-16 resize-y" />
+                <label className="text-[11px] text-slate-500">Risques / retards (un par ligne)</label>
+                <textarea value={lines(b.risques_retards)} onChange={e => upd(c => { c.bilan[i].risques_retards = toArr(e.target.value); })} className="w-full text-sm border border-slate-200 rounded p-2 h-16 resize-y" />
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="text-xs font-semibold text-slate-500 uppercase mb-2">Objectifs de la semaine</div>
+            {(bilan.objectifs_hebdo || []).map((g: any, gi: number) => (
+              <div key={gi} className="border border-slate-200 rounded-lg p-3 mb-3">
+                <input value={g.projet || ''} onChange={e => upd(c => { c.objectifs_hebdo[gi].projet = e.target.value; })} className="font-semibold text-slate-800 w-full mb-2 outline-none border-b border-transparent focus:border-slate-300" />
+                {(g.objectifs || []).map((o: any, oi: number) => (
+                  <div key={oi} className="bg-slate-50 rounded p-2 mb-2">
+                    <div className="flex gap-2 items-center mb-1">
+                      <span className="text-[11px] text-slate-400">P</span>
+                      <input type="number" min={1} value={o.priorite || 1} onChange={e => upd(c => { c.objectifs_hebdo[gi].objectifs[oi].priorite = Number(e.target.value); })} className="w-12 text-sm border border-slate-200 rounded px-1" />
+                      <input value={o.intitule || ''} onChange={e => upd(c => { c.objectifs_hebdo[gi].objectifs[oi].intitule = e.target.value; })} placeholder="Objectif SMART" className="flex-1 text-sm border border-slate-200 rounded px-2 py-1" />
+                    </div>
+                    <input value={lines(o.actions_liees)} onChange={e => upd(c => { c.objectifs_hebdo[gi].objectifs[oi].actions_liees = toArr(e.target.value); })} placeholder="Actions/livrables liés (un par ligne)" className="w-full text-xs border border-slate-200 rounded px-2 py-1 mb-1" />
+                    <input value={o.critere_succes || ''} onChange={e => upd(c => { c.objectifs_hebdo[gi].objectifs[oi].critere_succes = e.target.value; })} placeholder="Critère de succès mesurable" className="w-full text-xs border border-slate-200 rounded px-2 py-1" />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 px-5 py-3 border-t border-slate-100 sticky bottom-0 bg-white">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50">Annuler</button>
+          <button onClick={downloadPdf} disabled={sending} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-60"><FileText className="w-4 h-4" /> PDF</button>
+          <button onClick={sendBilan} disabled={sending} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-60"><Mail className="w-4 h-4" /> Envoyer le bilan</button>
+          <button onClick={onSave} className="px-3 py-1.5 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700">Enregistrer le bilan</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -573,6 +807,8 @@ interface RowProps {
   extra?: React.ReactNode;
   slip?: { count: number; days: number; original: string } | null;
   onMoveUp?: () => void; onMoveDown?: () => void; canMoveUp?: boolean; canMoveDown?: boolean;
+  onSetPosition?: (n: number) => void; position?: number; posMax?: number;
+  commentStatut?: string; onIntegrate?: () => void;
 }
 function Row(p: RowProps) {
   const showMove = p.canEdit && (p.onMoveUp || p.onMoveDown);
@@ -585,6 +821,12 @@ function Row(p: RowProps) {
               <button onClick={p.onMoveUp} disabled={!p.canMoveUp} title="Monter" className="text-slate-300 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-300 leading-none"><ChevronUp className="w-3.5 h-3.5" /></button>
               <button onClick={p.onMoveDown} disabled={!p.canMoveDown} title="Descendre" className="text-slate-300 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-300 leading-none"><ChevronDown className="w-3.5 h-3.5" /></button>
             </span>
+          )}
+          {p.onSetPosition && (
+            <input type="number" min={1} max={p.posMax} defaultValue={p.position} key={`pos-${p.position}`}
+              title="Position du livrable dans le jalon (saisie directe)"
+              onBlur={e => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n) && n !== p.position) p.onSetPosition!(n); }}
+              className="w-8 mr-1 text-[11px] text-center text-slate-500 border border-slate-200 rounded px-0.5 py-0.5 outline-none focus:border-blue-400 shrink-0" />
           )}
           {p.indent === 1 && <span className="text-slate-300 mr-1">↳</span>}
           {p.onToggle && (
@@ -633,6 +875,9 @@ function Row(p: RowProps) {
             key={p.comment}
             onBlur={e => e.target.value !== p.comment && p.onComment(e.target.value)}
             className="text-xs flex-1 bg-transparent outline-none focus:bg-white rounded px-1 text-slate-600" />
+          {p.commentStatut === 'intégré'
+            ? <span title="Commentaire intégré à la note de synthèse" className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-green-600 shrink-0"><Check className="w-3 h-3" />intégré</span>
+            : (p.onIntegrate && p.comment && <button onClick={p.onIntegrate} title="Intégrer ce commentaire à la note de synthèse" className="text-slate-300 hover:text-green-600 shrink-0"><Check className="w-3.5 h-3.5" /></button>)}
           <button onClick={p.onHistory} title="Historique des commentaires" className="text-slate-300 hover:text-blue-600 shrink-0"><History className="w-3.5 h-3.5" /></button>
         </div>
       </td>

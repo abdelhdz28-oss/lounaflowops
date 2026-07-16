@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
 import { Search, Loader2, RefreshCw, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
-import { MayaChat } from '../components/MayaChat';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 const fmt = (n: number) => (n || 0).toLocaleString('fr-FR', { maximumFractionDigits: 0 });
@@ -233,8 +232,6 @@ export function OdooView() {
           </tbody>
         </table>
       </div>
-
-      <MayaChat />
     </div>
   );
 }
