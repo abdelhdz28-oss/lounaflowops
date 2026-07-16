@@ -5840,6 +5840,34 @@ async function qmsFindItemId(name: string): Promise<string> {
 async function qmsSourceFileBuffer(name: string): Promise<Buffer> {
   return graphDownloadById(await qmsFindItemId(name));
 }
+// Dossier SharePoint des NC : résout le lien de partage, liste les sous-dossiers,
+// et renvoie une map { numéro NC (majuscules) → webUrl du sous-dossier } + le lien du dossier racine.
+const QMS_NC_FOLDER_URL = process.env.QMS_NC_FOLDER_URL ||
+  'https://lounaaesthetics.sharepoint.com/:f:/r/sites/LOUNAAESTHETICS/Documents%20partages/General/02_ASSURANCE%20QUALIT%C3%89/03%20-%20Quality/05%20-%20Records/03%20-%20Non-conformities?csf=1&web=1&e=gWGAql';
+function shareIdFromUrl(url: string): string {
+  const b64 = Buffer.from(url).toString('base64').replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+  return 'u!' + b64;
+}
+async function qmsFolderMap(shareUrl: string): Promise<{ base: string | null; byExtId: Map<string, string> }> {
+  const byExtId = new Map<string, string>();
+  let base: string | null = null;
+  try {
+    const item: any = await graphGet(`${GRAPH}/shares/${shareIdFromUrl(shareUrl)}/driveItem?$select=id,webUrl,parentReference`);
+    base = item?.webUrl || null;
+    const driveId = item?.parentReference?.driveId || process.env.GRAPH_DRIVE_ID;
+    let url: string | null = `${GRAPH}/drives/${driveId}/items/${item.id}/children?$select=name,webUrl,folder&$top=200`;
+    while (url) {
+      const j: any = await graphGet(url);
+      for (const c of j.value || []) {
+        const m = String(c.name || '').match(/NC[-\s_]?(\d[\d\s\-_]*\d)/i);
+        if (m && c.webUrl) byExtId.set(m[1].replace(/\D/g, ''), c.webUrl); // clé = chiffres seuls
+      }
+      url = j['@odata.nextLink'] || null;
+    }
+  } catch (e) { console.error('qmsFolderMap NC', (e as any)?.message || e); }
+  return { base, byExtId };
+}
+
 // Lien SharePoint (webUrl) du fichier de suivi — pour rendre les N° NC/CAPA cliquables.
 async function qmsSourceFileUrl(name: string): Promise<string | null> {
   try {
@@ -5979,25 +6007,38 @@ async function qmsRefreshNc(): Promise<number> {
   const ws = wb.Sheets['NC Tracking List'];
   if (!ws) throw new Error('Onglet « NC Tracking List » introuvable');
   const fileUrl = await qmsSourceFileUrl(QMS_NC_FILE);
+  const folder = await qmsFolderMap(QMS_NC_FOLDER_URL); // dossiers SharePoint des NC (par numéro)
+  console.log(`📁 NC : ${folder.byExtId.size} sous-dossier(s) SharePoint mappé(s), racine ${folder.base ? 'ok' : 'absente'}`);
   const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
   const seen: string[] = []; let n = 0;
   for (let i = 16; i < aoa.length; i++) {
     const r = aoa[i]; if (!r) continue;
     const extId = qmsClean(r[0]); if (!extId || !/^NC-/i.test(extId)) continue;
     const raw = qmsClean(r[2]);
+    // Lien vers le DOSSIER de la NC : sous-dossier SharePoint (par n°) > hyperlien de cellule > dossier racine > fichier de suivi.
+    const rowUrl = folder.byExtId.get(extId.replace(/\D/g, '')) || qmsCellLink(ws, XLSX, i) || folder.base || fileUrl;
     try {
       await pool.query(
         `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref, web_url)
          VALUES ('NC',$1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (kind, ext_id) DO UPDATE SET description=EXCLUDED.description, status=EXCLUDED.status, raw_status=EXCLUDED.raw_status,
            opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, web_url=EXCLUDED.web_url, imported_at=CURRENT_TIMESTAMP`,
-        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[18]), parseAnyDate(r[21]), qmsClean(r[15]), fileUrl]
+        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[18]), parseAnyDate(r[21]), qmsClean(r[15]), rowUrl]
       );
       seen.push(extId); n++;
     } catch (e) { console.error(`QMS NC upsert « ${extId} »`, (e as any)?.message || e); }
   }
   if (n > 0) await pool.query(`DELETE FROM qms_tracking WHERE kind='NC' AND ext_id <> ALL($1)`, [seen]);
   return n;
+}
+// Premier hyperlien trouvé sur une ligne d'un onglet Excel (pointe vers le dossier de l'enregistrement).
+function qmsCellLink(ws: any, XLSX: any, row: number): string | null {
+  for (let c = 0; c < 30; c++) {
+    const cell = ws[XLSX.utils.encode_cell({ r: row, c })];
+    const t = cell?.l?.Target;
+    if (t && /^https?:\/\//i.test(t)) return t;
+  }
+  return null;
 }
 
 const QMS_CAPA_FILE = process.env.QMS_CAPA_FILE_NAME || 'CAPA Tracking List - 260423.xlsx';
@@ -6016,13 +6057,14 @@ async function qmsRefreshCapa(): Promise<number> {
     const r = aoa[i]; if (!r) continue;
     const extId = qmsClean(r[0]); if (!extId || !/^CAPA-/i.test(extId)) continue;
     const raw = qmsClean(r[2]);
+    const rowUrl = qmsCellLink(ws, XLSX, i) || fileUrl;
     try {
       await pool.query(
         `INSERT INTO qms_tracking (kind, ext_id, description, status, raw_status, opening_date, due_date, closure_date, ref, web_url)
          VALUES ('CAPA',$1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (kind, ext_id) DO UPDATE SET description=EXCLUDED.description, status=EXCLUDED.status, raw_status=EXCLUDED.raw_status,
            opening_date=EXCLUDED.opening_date, due_date=EXCLUDED.due_date, closure_date=EXCLUDED.closure_date, ref=EXCLUDED.ref, web_url=EXCLUDED.web_url, imported_at=CURRENT_TIMESTAMP`,
-        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[11]), parseAnyDate(r[19]), qmsClean(r[7]), fileUrl]
+        [extId, qmsClean(r[1]), trackStatus(raw), raw, parseAnyDate(r[4]), parseAnyDate(r[11]), parseAnyDate(r[19]), qmsClean(r[7]), rowUrl]
       );
       seen.push(extId); n++;
     } catch (e) { console.error(`QMS CAPA upsert « ${extId} »`, (e as any)?.message || e); }
