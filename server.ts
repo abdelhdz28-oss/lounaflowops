@@ -5848,22 +5848,28 @@ function shareIdFromUrl(url: string): string {
   const b64 = Buffer.from(url).toString('base64').replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
   return 'u!' + b64;
 }
-async function qmsFolderMap(shareUrl: string): Promise<{ base: string | null; byExtId: Map<string, string> }> {
+async function qmsFolderMap(shareUrl: string, debugNames?: string[]): Promise<{ base: string | null; byExtId: Map<string, string> }> {
   const byExtId = new Map<string, string>();
   let base: string | null = null;
   try {
     const item: any = await graphGet(`${GRAPH}/shares/${shareIdFromUrl(shareUrl)}/driveItem?$select=id,webUrl,parentReference`);
     base = item?.webUrl || null;
     const driveId = item?.parentReference?.driveId || process.env.GRAPH_DRIVE_ID;
-    let url: string | null = `${GRAPH}/drives/${driveId}/items/${item.id}/children?$select=name,webUrl,folder&$top=200`;
-    while (url) {
-      const j: any = await graphGet(url);
-      for (const c of j.value || []) {
-        const m = String(c.name || '').match(/NC[-\s_]?(\d[\d\s\-_]*\d)/i);
-        if (m && c.webUrl) byExtId.set(m[1].replace(/\D/g, ''), c.webUrl); // clé = chiffres seuls
+    // Parcours récursif (dossiers rangés par année ou sous-dossiers) — profondeur bornée.
+    const visit = async (itemId: string, depth: number): Promise<void> => {
+      let url: string | null = `${GRAPH}/drives/${driveId}/items/${itemId}/children?$select=id,name,webUrl,folder&$top=200`;
+      while (url) {
+        const j: any = await graphGet(url);
+        for (const c of j.value || []) {
+          if (debugNames) debugNames.push('  '.repeat(depth) + (c.folder ? '📁 ' : '📄 ') + (c.name || ''));
+          const m = String(c.name || '').match(/NC[-\s_]?(\d[\d\s\-_]*\d)/i);
+          if (m && c.webUrl) { const k = m[1].replace(/\D/g, ''); if (!byExtId.has(k)) byExtId.set(k, c.webUrl); }
+          if (c.folder && depth < 2) await visit(c.id, depth + 1); // descend dans les sous-dossiers (ex. par année)
+        }
+        url = j['@odata.nextLink'] || null;
       }
-      url = j['@odata.nextLink'] || null;
-    }
+    };
+    await visit(item.id, 0);
   } catch (e) { console.error('qmsFolderMap NC', (e as any)?.message || e); }
   return { base, byExtId };
 }
