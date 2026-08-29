@@ -176,7 +176,7 @@ export function ForecastsView({ onOpenBatch }: ForecastsViewProps) {
   };
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
         <h3 className="text-lg font-semibold text-slate-800">Forecasts</h3>
         {canEdit && (

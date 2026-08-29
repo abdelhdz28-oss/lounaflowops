@@ -56,6 +56,27 @@ export interface Batch {
   status: 'UPCOMING' | 'ON_TRACK' | 'AT_RISK' | 'COMPLETED';
   process_stage: ProcessStage;
   quality_status: QualityStatus;
+  /** Fil de vie du lot : qui s'en occupe, ce qui le bloque, depuis quand il est à cette étape. */
+  responsable?: string;
+  blocage_motif?: string;
+  /** Posée par le serveur à chaque changement d'étape — ne jamais l'écrire depuis le navigateur. */
+  stage_since?: string | null;
+  /** Date d'enlèvement RÉELLE (la marchandise est partie) — c'est elle qui autorise la clôture. */
+  pickup_date?: string | null;
+  /** Lot clôturé : sorti des listes actives, fiche en lecture seule. Rien n'est supprimé. */
+  /** Boîtes produites forcées à la main plutôt que calculées. */
+  sold_manuel?: boolean;
+  /** Date de libération du lot (détectée sur SharePoint). */
+  releaseDate?: string | null;
+  cloture?: boolean;
+  cloture_at?: string | null;
+  cloture_par?: string | null;
+  /** Trace de la notification de libération envoyée au PRRC (date ISO + auteur). */
+  prrcNotifiedAt?: string | null;
+  prrcNotifiedBy?: string | null;
+  /** Document de libération détecté dans le dossier 07-LIBERATION du lot sur SharePoint. */
+  releaseDocUrl?: string | null;
+  releaseDocName?: string | null;
   schedule_health: ScheduleHealth;
   progress: number;
   startDate: string;

@@ -233,7 +233,7 @@ function ExcelLotsTab() {
     await load(); // relecture → le n° de lot recalculé par Excel réapparaît
   };
 
-  if (loading && !data) return <div className="p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Lecture du fichier Excel…</div>;
+  if (loading && !data) return <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Lecture du fichier Excel…</div>;
 
   if (data && data.configured === false) {
     return (
@@ -358,7 +358,7 @@ function ExcelLotsTab() {
 }
 
 // ============================================================================
-// Onglet 3 — Création DDL : modèle Word approuvé (SharePoint) + n° de lot → PDF
+// Onglet 3 — Création DDL : modèle Word approuvé (SharePoint) + n° de lot → fichier Word rempli
 // ============================================================================
 type DdlFile = { itemId: string; name: string; modified: string; ddlNumber: string | null; version: string | null };
 type DdlFamily = { name: string; files: DdlFile[] };
@@ -373,7 +373,7 @@ const PRRC_EMAIL = 'f.hadjab@louna-aesthetics.com';
 
 // Cycle de vie d'un DDL (suivi visuel, étapes cliquables).
 const DDL_STEPS = [
-  { id: 'GENERE', label: 'PDF généré' },
+  { id: 'GENERE', label: 'Word généré' },
   { id: 'EN_VALIDATION', label: 'Validation QA' },
   { id: 'VALIDE', label: 'DDL validé' },
   { id: 'IMPRIME', label: 'DDL imprimé' },
@@ -403,7 +403,10 @@ function DdlStepper({ status, canEdit, onSet }: { status: string | null; canEdit
 
 function DdlTab() {
   const { token, canEdit } = useAuth();
+  const { batches } = useAppContext();
   const auth = { headers: { Authorization: `Bearer ${token}` } };
+  // Le n° de lot se choisit parmi les lots existants : plus de saisie libre, donc plus de dossier orphelin.
+  const lotsConnus = (Array.isArray(batches) ? batches : []).map((b: Batch) => b.id).filter(Boolean).sort();
 
   const [families, setFamilies] = useState<DdlFamily[] | null>(null);
   const [banner, setBanner] = useState('');
@@ -412,6 +415,9 @@ function DdlTab() {
   const [lot, setLot] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
+  // « EA130A », « ea130 a » et « EA-130A » désignent le même lot (même règle que côté serveur).
+  const normLot = (v: string) => v.toUpperCase().replace(/[\s\-_.]/g, '').trim();
+  const lotReconnu = lotsConnus.some(id => normLot(id) === normLot(lot));
   const [list, setList] = useState<DdlRecord[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
 
@@ -447,7 +453,7 @@ function DdlTab() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setMsg(d.error || `Génération impossible (HTTP ${r.status}).`); return; }
-      setMsg(`✅ PDF généré pour le lot ${lot.trim()} — n° de lot inscrit dans ${d.headerHits} en-tête(s) et ${d.bodyHits} champ(s) du corps.`);
+      setMsg(`✅ Fichier Word généré pour le lot ${lot.trim()} — n° de lot inscrit dans ${d.headerHits} en-tête(s) et ${d.bodyHits} champ(s) du corps.`);
       setLot('');
       await loadList();
     } catch { setMsg('Erreur pendant la génération.'); }
@@ -460,12 +466,12 @@ function DdlTab() {
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = r.pdf_filename || 'ddl.pdf'; a.click();
+    a.href = url; a.download = r.pdf_filename || 'ddl.docx'; a.click();
     URL.revokeObjectURL(url);
   };
 
   const remove = async (id: number) => {
-    if (!confirm('Supprimer ce PDF généré ?')) return;
+    if (!confirm('Supprimer ce dossier de lot généré ?')) return;
     await fetch(`${API_URL}/api/prepprod/ddl/${id}`, { method: 'DELETE', ...auth });
     await loadList();
   };
@@ -479,7 +485,7 @@ function DdlTab() {
     await loadList();
   };
 
-  // Envoi au PRRC : crée un BROUILLON dans Outlook (PDF en pièce jointe) et l'ouvre.
+  // Envoi au PRRC : crée un BROUILLON dans Outlook (fichier Word en pièce jointe) et l'ouvre.
   // Abdel vérifie et clique « Envoyer » lui-même (aucun envoi auto, aucun fichier .eml).
   const sendToPrrc = async (r: DdlRecord) => {
     setMsg('');
@@ -488,7 +494,7 @@ function DdlTab() {
       const d = await resp.json().catch(() => ({}));
       if (resp.ok && d.draft) {
         if (d.webLink) window.open(d.webLink, '_blank');
-        setMsg(`✅ Brouillon créé dans Outlook (${d.to || PRRC_EMAIL}) avec le PDF du lot ${r.lot} en pièce jointe — vérifie et clique « Envoyer ».`);
+        setMsg(`✅ Brouillon créé dans Outlook (${d.to || PRRC_EMAIL}) avec le fichier Word du lot ${r.lot} en pièce jointe — vérifie et clique « Envoyer ».`);
         await loadList();
         return;
       }
@@ -498,7 +504,7 @@ function DdlTab() {
     }
   };
 
-  // « DDL imprimé » : lance l'impression du PDF depuis le navigateur (boîte de dialogue d'impression).
+  // « DDL imprimé » : télécharge le fichier Word pour impression.
   // Le DDL est désormais un fichier Word (.docx) : on le télécharge (à ouvrir puis imprimer depuis Word).
   const printPdf = async (r: DdlRecord) => {
     try {
@@ -513,13 +519,13 @@ function DdlTab() {
   };
 
   const onStep = async (r: DdlRecord, s: string) => {
-    // « Validation QA » : crée automatiquement l'email au PRRC avec le PDF en pièce jointe.
+    // « Validation QA » : crée automatiquement l'email au PRRC avec le fichier Word en pièce jointe.
     if (s === 'EN_VALIDATION') { await sendToPrrc(r); return; }
     if (s === 'IMPRIME') await printPdf(r);
     await setStatus(r.id, s);
   };
 
-  // Sélection multiple + envoi groupé : un seul brouillon Outlook avec tous les PDF joints.
+  // Sélection multiple + envoi groupé : un seul brouillon Outlook avec tous les fichiers Word joints.
   const toggleSel = (id: number) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   const allSelected = list.length > 0 && selected.length === list.length;
   const toggleAll = () => setSelected(allSelected ? [] : list.map(r => r.id));
@@ -578,12 +584,14 @@ function DdlTab() {
           </label>
           <label className="block">
             <span className="text-xs font-medium text-slate-500 block mb-1">3 · N° de lot</span>
-            <input value={lot} onChange={e => setLot(e.target.value)} placeholder="ex. EA130A" className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2" />
+            <input list="ddl-lots" value={lot} onChange={e => setLot(e.target.value)} placeholder="choisir un lot" className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2" />
+            <datalist id="ddl-lots">{lotsConnus.map(id => <option key={id} value={id} />)}</datalist>
+            {lot.trim() && !lotReconnu && <span className="block mt-1 text-[11px] text-amber-600">Ce lot n'existe pas dans le suivi de production — choisis-le dans la liste.</span>}
           </label>
-          <button onClick={generate} disabled={busy || !canEdit || !file || !lot.trim()}
+          <button onClick={generate} disabled={busy || !canEdit || !file || !lot.trim() || !lotReconnu}
             className="h-[38px] px-4 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-            {busy ? 'Génération…' : 'Générer le PDF'}
+            {busy ? 'Génération…' : 'Générer le Word'}
           </button>
         </div>
         {file && (
@@ -599,7 +607,7 @@ function DdlTab() {
         )}
       </div>
 
-      {/* Historique des PDF générés */}
+      {/* Historique des dossiers générés */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-2">
           <h3 className="font-semibold text-slate-800">DDL générés <span className="text-xs font-normal text-slate-400">· {list.length}</span></h3>
@@ -637,7 +645,7 @@ function DdlTab() {
                 <td className="px-4 py-2.5"><DdlStepper status={r.status} canEdit={canEdit} onSet={s => onStep(r, s)} /></td>
                 <td className="px-4 py-2.5 text-right">
                   <div className="flex items-center gap-1 justify-end">
-                    <button onClick={() => download(r)} title="Télécharger le PDF" className="p-1.5 rounded hover:bg-blue-50 text-blue-600"><Download className="w-4 h-4" /></button>
+                    <button onClick={() => download(r)} title="Télécharger le fichier Word" className="p-1.5 rounded hover:bg-blue-50 text-blue-600"><Download className="w-4 h-4" /></button>
                     {canEdit && (
                       <button onClick={() => sendToPrrc(r)} title={`Envoyer au PRRC (${PRRC_EMAIL}) pour validation`}
                         className="p-1.5 rounded hover:bg-violet-50 text-violet-600"><Mail className="w-4 h-4" /></button>

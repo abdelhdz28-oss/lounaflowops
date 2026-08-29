@@ -2,12 +2,12 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
 import { formatDate } from '../constants';
-import { Plus, Trash2, FileCheck, Upload, FileText, AlertTriangle, FileX, XCircle, Clock, X, Loader2, Pencil, Search, Copy, Printer } from 'lucide-react';
+import { Plus, Trash2, FileCheck, Upload, FileText, AlertTriangle, FileX, XCircle, Clock, X, Loader2, Pencil, Search, Copy, Printer, Download, ChevronRight, ChevronDown, History } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine, Cell } from 'recharts';
+import * as XLSX from 'xlsx';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
-const PEREMPTION_JOURS = 60;
-// Fenêtre « à surveiller » du design CoA Tracking porté (écran Lots / Dashboard).
+// Seuil UNIQUE de surveillance de la péremption : tuiles, badges et alertes disent tous la même chose.
 const PEREMPTION_SURVEILLANCE_JOURS = 90;
 const SEUIL_LOSS_DEFAUT = 10;
 
@@ -18,12 +18,12 @@ interface Lot {
   numeroLot: string; fournisseur: string; referenceInterne: string | null; referenceClient: string | null; numeroCommande: string | null;
   dateCommande: string | null; dateReception: string | null; datePeremption: string | null;
   quantiteG: number | null; quantiteUnite?: string; lossDrying: number | null; seuilLossDrying: number | null;
-  aVerifierManuel: boolean; aVerifier: boolean; coaFichier: string | null; coaLien: string | null; hasCoaDoc: boolean; hasCoa: boolean; commentaire: string | null;
+  aVerifierManuel: boolean; aVerifier: boolean; coaFichier: string | null; hasCoaDoc: boolean; coaVersions: number; commentaire: string | null;
 }
 interface Board { materiaux: Materiau[]; references: Reference[]; lots: Lot[]; }
 
 const daysUntil = (iso: string | null) => iso ? Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000) : null;
-const isPeremptionProche = (l: Lot) => { const d = daysUntil(l.datePeremption); return d !== null && d <= PEREMPTION_JOURS; };
+const isPeremptionProche = (l: Lot) => { const d = daysUntil(l.datePeremption); return d !== null && d < PEREMPTION_SURVEILLANCE_JOURS; };
 
 // ---------- Statuts & formats (design CoA Tracking porté) ----------
 type StatutPeremption = 'VALIDE' | 'A_SURVEILLER' | 'EXPIRE' | 'INCONNU';
@@ -50,8 +50,11 @@ function motifAVerifier(l: Lot, lossApplicable: boolean): string {
 const fmtKg = (g: number | null) => g == null ? '—' : (g / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' kg';
 // Quantité saisie affichée avec son unité (g / kg / L).
 const fmtQty = (q: number | null, u?: string) => q == null ? '—' : q.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' ' + (u || 'g');
-// Normalise vers des kg pour les agrégats (kg = kg, L ≈ kg, g / 1000).
-const qToKg = (q: number | null, u?: string) => { const v = q ?? 0; return (u === 'kg' || u === 'L') ? v : v / 1000; };
+// Normalise vers des kg pour les agrégats (kg = kg, g / 1000).
+// Les litres ne sont PAS convertis en kilos (la densité dépend de la matière) : ils sont totalisés à part.
+const qToKg = (q: number | null, u?: string) => { if (u === 'L') return 0; const v = q ?? 0; return u === 'kg' ? v : v / 1000; };
+const qToL = (q: number | null, u?: string) => u === 'L' ? (q ?? 0) : 0;
+const fmtL = (l: number) => l.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' L';
 const fmtPct = (p: number | null) => p == null ? '—' : p.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' %';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -189,7 +192,7 @@ export function CoaTrackingView({ view }: { view: string }) {
     return r.ok;
   };
 
-  if (loading) return <div className="p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (loading) return <div className="p-4 sm:p-6 lg:p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
 
   const effView = drill?.view ?? view;
   return (
@@ -204,9 +207,11 @@ export function CoaTrackingView({ view }: { view: string }) {
 
 // ---------- Alertes (calcul partagé) ----------
 function buildAlertes(board: Board) {
-  const out: { type: 'coa' | 'peremption'; lot: Lot; label: string }[] = [];
+  const out: { type: 'coa' | 'peremption' | 'sansDate'; lot: Lot; label: string }[] = [];
   for (const l of board.lots) {
     if (!l.hasCoaDoc) out.push({ type: 'coa', lot: l, label: 'CoA manquant' });
+    // Un lot sans date de péremption n'apparaîtrait dans aucune alerte : on le signale explicitement.
+    if (!l.datePeremption) out.push({ type: 'sansDate', lot: l, label: 'Date de péremption manquante' });
     if (isPeremptionProche(l)) {
       const d = daysUntil(l.datePeremption)!;
       out.push({ type: 'peremption', lot: l, label: d < 0 ? `Périmé depuis ${-d} j` : `Péremption dans ${d} j` });
@@ -221,6 +226,7 @@ function Dashboard({ board, onDrill }: { board: Board; onDrill: (filter: any) =>
   const matById = useMemo(() => Object.fromEntries(board.materiaux.map(m => [m.id, m])) as Record<number, Materiau>, [board.materiaux]);
 
   const totalKg = round2(lots.reduce((s, l) => s + qToKg(l.quantiteG, l.quantiteUnite), 0));
+  const totalL = round2(lots.reduce((s, l) => s + qToL(l.quantiteG, l.quantiteUnite), 0));
   const alertesLoss = lots.filter(l => statutLoss(l.lossDrying, l.seuilLossDrying, l.materiauId != null ? !!matById[l.materiauId]?.lossDryingApplicable : false) === 'ALERTE').length;
   const expires = lots.filter(l => statutPeremption(l.datePeremption) === 'EXPIRE').length;
   const aSurveiller = lots.filter(l => statutPeremption(l.datePeremption) === 'A_SURVEILLER').length;
@@ -236,16 +242,16 @@ function Dashboard({ board, onDrill }: { board: Board; onDrill: (filter: any) =>
       <h3 className="text-lg font-semibold text-slate-800 mb-4">CoA Tracking · Tableau de bord</h3>
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
         <Kpi title="LOTS" value={lots.length} onClick={() => onDrill({})} />
-        <Kpi title="QUANTITÉ TOTALE" value={`${totalKg} kg`} />
+        <Kpi title="QUANTITÉ TOTALE" value={`${totalKg} kg`} sub={totalL ? `+ ${fmtL(totalL)} (liquides, comptés à part)` : undefined} />
         <Kpi title="LOSS EN ALERTE" value={alertesLoss} color={alertesLoss ? 'text-red-600' : undefined} onClick={() => onDrill({ lossAlerte: true })} />
         <Kpi title="EXPIRÉS" value={expires} color={expires ? 'text-red-600' : undefined} onClick={() => onDrill({ peremption: 'EXPIRE' })} />
         <Kpi title="< 90 JOURS" value={aSurveiller} color={aSurveiller ? 'text-amber-600' : undefined} onClick={() => onDrill({ peremption: 'A_SURVEILLER' })} />
         <Kpi title="À VÉRIFIER" value={aVerifier} color={aVerifier ? 'text-orange-600' : undefined} onClick={() => onDrill({ aVerifier: true })} />
       </div>
       <div className="grid grid-cols-1 gap-4 mb-6">
-        <ChartCard title="1 · Quantité reçue par fournisseur (kg)"><KgParFournisseurChart data={dataFournisseur} /></ChartCard>
+        <ChartCard title="1 · Quantité reçue par fournisseur (kg, hors liquides)"><KgParFournisseurChart data={dataFournisseur} /></ChartCard>
         <ChartCard title="2 · Loss Drying moyen par matière (seuil 10 %)"><LossMoyenneChart data={dataLoss} /></ChartCard>
-        <ChartCard title="3 · Quantités reçues par année (kg)"><QuantiteParAnChart data={dataAnnee} /></ChartCard>
+        <ChartCard title="3 · Quantités reçues par année (kg, hors liquides)"><QuantiteParAnChart data={dataAnnee} /></ChartCard>
       </div>
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-100 font-semibold text-slate-800">Alertes en cours <span className="text-xs font-normal text-slate-400">· {alertes.length}</span></div>
@@ -294,6 +300,8 @@ function AlertesList({ alertes }: { alertes: { type: string; lot: Lot; label: st
             <td className="px-4 py-2">
               {a.type === 'coa'
                 ? <span className="inline-flex items-center gap-1 text-xs font-medium text-red-700 bg-red-100 border border-red-200 rounded-full px-2 py-0.5"><FileX className="w-3 h-3" /> CoA</span>
+                : a.type === 'sansDate'
+                ? <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-700 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5"><AlertTriangle className="w-3 h-3" /> Donnée</span>
                 : <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-100 border border-amber-200 rounded-full px-2 py-0.5"><Clock className="w-3 h-3" /> Péremption</span>}
             </td>
             <td className="px-4 py-2 font-mono text-xs text-slate-700">{a.lot.numeroLot}</td>
@@ -307,11 +315,55 @@ function AlertesList({ alertes }: { alertes: { type: string; lot: Lot; label: st
   );
 }
 
+// ---------- Exports de la liste des lots (Excel / PDF), sur les lots filtrés à l'écran ----------
+const PEREMPTION_LABEL: Record<StatutPeremption, string> = { VALIDE: 'Valide', A_SURVEILLER: 'À surveiller', EXPIRE: 'Expiré', INCONNU: '—' };
+const jour = (iso: string | null) => iso ? formatDate(iso) : '';
+const horodatage = () => new Date().toISOString().slice(0, 10);
+
+const EXPORT_HEADERS = ['Matière', 'Libellé', 'Réf. interne', 'Réf. client', 'N° lot', 'Fournisseur', 'N° commande', 'Date commande', 'Date réception', 'Date péremption', 'Statut péremption', 'Quantité', 'Unité', 'Loss drying (%)', 'Seuil (%)', 'CoA', 'À vérifier', 'Commentaire'];
+const exportRow = (l: Lot) => [
+  l.materiauCode || '', l.materiauLibelle || '', l.referenceInterne || '', l.referenceClient || '', l.numeroLot, l.fournisseur,
+  l.numeroCommande || '', jour(l.dateCommande), jour(l.dateReception), jour(l.datePeremption), PEREMPTION_LABEL[statutPeremption(l.datePeremption)],
+  l.quantiteG ?? '', l.quantiteUnite || 'g', l.lossDrying ?? '', l.seuilLossDrying ?? '',
+  l.hasCoaDoc ? 'Oui' : 'Non', l.aVerifier ? 'Oui' : 'Non', l.commentaire || '',
+];
+
+function exportLotsExcel(lots: Lot[]) {
+  const ws = XLSX.utils.aoa_to_sheet([EXPORT_HEADERS, ...lots.map(exportRow)]);
+  ws['!cols'] = [{ wch: 10 }, { wch: 26 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 20 }, { wch: 16 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 14 }, { wch: 11 }, { wch: 7 }, { wch: 14 }, { wch: 10 }, { wch: 7 }, { wch: 10 }, { wch: 40 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Lots CoA');
+  XLSX.writeFile(wb, `CoA_lots_${horodatage()}.xlsx`);
+}
+
+// PDF paysage : sous-ensemble de colonnes pour rester lisible à l'impression.
+const PDF_HEADERS = ['Matière', 'N° lot', 'Fournisseur', 'N° commande', 'Date commande', 'Réception', 'Péremption', 'Quantité', 'Loss drying', 'CoA'];
+async function exportLotsPdf(lots: Lot[]) {
+  const esc = (v: any) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const cellules = (l: Lot) => [
+    l.materiauCode || '—', l.numeroLot, l.fournisseur, l.numeroCommande || '—', jour(l.dateCommande) || '—',
+    jour(l.dateReception) || '—', jour(l.datePeremption) || '—', fmtQty(l.quantiteG, l.quantiteUnite), fmtPct(l.lossDrying), l.hasCoaDoc ? 'Oui' : 'Non',
+  ];
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#0f172a">
+    <h2 style="font-size:15px;margin:0 0 2px">CoA Tracking — Lots matières premières</h2>
+    <div style="font-size:10px;color:#64748b;margin-bottom:8px">${lots.length} lot(s) · édité le ${esc(formatDate(horodatage()))}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:9px">
+      <thead><tr style="background:#f1f5f9">${PDF_HEADERS.map(h => `<th style="border:1px solid #cbd5e1;padding:4px;text-align:left">${esc(h)}</th>`).join('')}</tr></thead>
+      <tbody>${lots.map(l => `<tr>${cellules(l).map(c => `<td style="border:1px solid #e2e8f0;padding:4px">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table></div>`;
+  const html2pdf: any = (await import('html2pdf.js')).default;
+  await html2pdf().set({
+    margin: 6, image: { type: 'jpeg', quality: 0.9 }, html2canvas: { scale: 2, useCORS: true },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape', compress: true },
+  }).from(html, 'string').save(`CoA_lots_${horodatage()}.pdf`);
+}
+
 // ---------- Lots ----------
-const EMPTY_LOT = { materiauId: '', numeroLot: '', fournisseur: '', referenceInterne: '', referenceClient: '', numeroCommande: '', dateCommande: '', dateReception: '', datePeremption: '', quantiteG: '', quantiteUnite: 'g', lossDrying: '', aVerifierManuel: false, commentaire: '' };
+const EMPTY_LOT ={ materiauId: '', numeroLot: '', fournisseur: '', referenceInterne: '', referenceClient: '', numeroCommande: '', dateCommande: '', dateReception: '', datePeremption: '', quantiteG: '', quantiteUnite: 'g', lossDrying: '', aVerifierManuel: false, commentaire: '' };
 
 function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Board; api: any; token: string | null; canEdit: boolean; reload: () => void; initialFilter?: any }) {
   const [editing, setEditing] = useState<any | null>(null);
+  const [histo, setHisto] = useState<Lot | null>(null);
   const fileInputs = useRef<Record<number, HTMLInputElement | null>>({});
 
   const uploadCoa = async (lotId: number, file: File) => {
@@ -339,11 +391,11 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
   };
   // Ouvre le sélecteur de fichier ; si un CoA existe déjà, on confirme le remplacement.
   const pickCoaFile = (lotId: number, hasDoc: boolean) => {
-    if (hasDoc && !confirm('Un CoA est déjà attaché à ce lot.\nLe remplacer par un nouveau fichier ?')) return;
+    if (hasDoc && !confirm('Un CoA est déjà attaché à ce lot.\nLe remplacer par un nouveau fichier ?\n\n(l\'ancien certificat sera archivé et restera consultable dans l\'historique)')) return;
     fileInputs.current[lotId]?.click();
   };
   const deleteCoa = async (lotId: number) => {
-    if (!confirm('Supprimer le CoA téléversé pour ce lot ? (le lot restera, seul le fichier est retiré)')) return;
+    if (!confirm('Retirer le certificat de ce lot ?\n\nIl sera archivé dans l\'historique et restera consultable. Le lot, lui, est conservé.')) return;
     const r = await fetch(`${API_URL}/api/coa/lots/${lotId}/document`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     if (!r.ok) alert('Échec de la suppression.');
     reload();
@@ -393,16 +445,17 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
   }, [board.lots, q, matiere, fournisseur, peremption, lossAlerte, sansCoa, aVerifierF, matById]);
 
   const kpis = useMemo(() => {
-    let kg = 0, alertesLoss = 0, aSurveiller = 0, expires = 0, sansCoaN = 0;
+    let kg = 0, litres = 0, alertesLoss = 0, aSurveiller = 0, expires = 0, sansCoaN = 0;
     for (const l of filtres) {
       kg += qToKg(l.quantiteG, l.quantiteUnite);
+      litres += qToL(l.quantiteG, l.quantiteUnite);
       if (statutLoss(l.lossDrying, l.seuilLossDrying, lossApplicable(l)) === 'ALERTE') alertesLoss++;
       const sp = statutPeremption(l.datePeremption);
       if (sp === 'A_SURVEILLER') aSurveiller++;
       if (sp === 'EXPIRE') expires++;
       if (!l.hasCoaDoc) sansCoaN++;
     }
-    return { total: filtres.length, kg: round2(kg), alertesLoss, aSurveiller, expires, sansCoaN };
+    return { total: filtres.length, kg: round2(kg), litres: round2(litres), alertesLoss, aSurveiller, expires, sansCoaN };
   }, [filtres]);
 
   // Tri croissant/décroissant sur la colonne active (valeurs vides toujours en bas).
@@ -410,13 +463,14 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
     if (!sortKey) return filtres;
     const dir = sortDir === 'asc' ? 1 : -1;
     const num = new Set(['quantiteG', 'lossDrying', 'coa']);
-    const date = new Set(['dateReception', 'datePeremption']);
+    const date = new Set(['dateCommande', 'dateReception', 'datePeremption']);
     const val = (l: Lot): any => {
       switch (sortKey) {
         case 'materiauCode': return l.materiauCode || '';
         case 'referenceInterne': return l.referenceInterne || '';
         case 'numeroLot': return l.numeroLot || '';
         case 'fournisseur': return l.fournisseur || '';
+        case 'dateCommande': return l.dateCommande || '';
         case 'dateReception': return l.dateReception || '';
         case 'datePeremption': return l.datePeremption || '';
         case 'quantiteG': return l.quantiteG;
@@ -455,13 +509,20 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
     <div>
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-slate-800">CoA Tracking · Lots <span className="text-sm font-normal text-slate-400">· {board.lots.length}</span></h3>
-        {canEdit && <button onClick={() => setEditing({ ...EMPTY_LOT })} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Plus className="w-4 h-4" /> Lot</button>}
+        <div className="flex items-center gap-2">
+          {/* Exports : reprennent exactement les lots affichés (filtres + tri en cours) */}
+          <button onClick={() => exportLotsExcel(sorted)} disabled={!sorted.length} title="Exporter les lots affichés en Excel"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"><Download className="w-4 h-4" /> Excel</button>
+          <button onClick={() => exportLotsPdf(sorted)} disabled={!sorted.length} title="Exporter les lots affichés en PDF"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"><FileText className="w-4 h-4" /> PDF</button>
+          {canEdit && <button onClick={() => setEditing({ ...EMPTY_LOT })} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Plus className="w-4 h-4" /> Lot</button>}
+        </div>
       </div>
 
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
         <Kpi title="LOTS AFFICHÉS" value={kpis.total} />
-        <Kpi title="QUANTITÉ TOTALE" value={`${kpis.kg} kg`} />
+        <Kpi title="QUANTITÉ TOTALE" value={`${kpis.kg} kg`} sub={kpis.litres ? `+ ${fmtL(kpis.litres)} (liquides, comptés à part)` : undefined} />
         <Kpi title="LOSS EN ALERTE" value={kpis.alertesLoss} color={kpis.alertesLoss ? 'text-red-600' : undefined} />
         <Kpi title="EXPIRÉ / < 90 J" value={`${kpis.expires} / ${kpis.aSurveiller}`} color={kpis.expires || kpis.aSurveiller ? 'text-amber-600' : undefined} />
         <Kpi title="SANS COA" value={kpis.sansCoaN} color={kpis.sansCoaN ? 'text-amber-600' : undefined} />
@@ -500,7 +561,7 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
         <table className="w-full text-sm">
           <thead><tr className="bg-slate-50 text-left text-[11px] uppercase text-slate-500">
             <SortTh k="materiauCode" label="Matière" /><SortTh k="referenceInterne" label="Réf" /><SortTh k="numeroLot" label="N° lot" /><SortTh k="fournisseur" label="Fournisseur" />
-            <SortTh k="dateReception" label="Réception" /><SortTh k="datePeremption" label="Péremption" /><SortTh k="quantiteG" label="Quantité" right />
+            <SortTh k="dateCommande" label="Commande" /><SortTh k="dateReception" label="Réception" /><SortTh k="datePeremption" label="Péremption" /><SortTh k="quantiteG" label="Quantité" right />
             <SortTh k="lossDrying" label="Loss Drying" right /><SortTh k="coa" label="CoA" /><th className="px-3 py-2"></th>
           </tr></thead>
           <tbody className="divide-y divide-slate-100">
@@ -517,7 +578,13 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-slate-700"><span className="inline-flex items-center gap-1">{l.numeroLot}{l.aVerifier && <span title={motifAVerifier(l, lossApplicable(l))} className="inline-flex cursor-help"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" aria-label={motifAVerifier(l, lossApplicable(l))} /></span>}</span></td>
                 <td className="px-3 py-2 text-slate-600">{l.fournisseur}</td>
-                <td className="px-3 py-2 text-slate-600">{l.dateReception ? formatDate(l.dateReception) : '—'}</td>
+                <td className="px-3 py-2 text-slate-600">
+                  <div className="flex flex-col">
+                    <DateInline lotId={l.id} champ="dateCommande" valeur={l.dateCommande} api={api} canEdit={canEdit} />
+                    {l.numeroCommande && <span className="font-mono text-[10px] text-slate-400 pl-1">{l.numeroCommande}</span>}
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-slate-600"><DateInline lotId={l.id} champ="dateReception" valeur={l.dateReception} api={api} canEdit={canEdit} /></td>
                 <td className="px-3 py-2">
                   <div className="flex flex-col gap-0.5">
                     <span className="text-slate-600">{l.datePeremption ? formatDate(l.datePeremption) : '—'}</span>
@@ -533,6 +600,12 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
                     {l.hasCoaDoc
                       ? <><button onClick={() => viewCoa(l.id)} title={l.coaFichier || 'Voir le CoA PDF'} className="inline-flex items-center gap-1 text-xs font-semibold text-green-700 hover:underline"><FileText className="w-3.5 h-3.5" /> PDF</button><button onClick={() => printCoa(l.id)} title="Imprimer le CoA" className="text-slate-400 hover:text-blue-600"><Printer className="w-3.5 h-3.5" /></button></>
                       : <span className="inline-flex items-center gap-1 text-xs font-medium text-red-600"><XCircle className="w-3.5 h-3.5" /> manquant</span>}
+                    {l.coaVersions > 0 && (
+                      <button onClick={() => setHisto(l)} title={`${l.coaVersions} version(s) archivée(s) — voir l'historique des certificats`}
+                        className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-1.5 py-0.5 hover:bg-slate-200">
+                        <History className="w-3 h-3" />{l.hasCoaDoc ? `v${l.coaVersions + 1}` : l.coaVersions}
+                      </button>
+                    )}
                     {canEdit && <>
                       <input ref={el => { fileInputs.current[l.id] = el; }} type="file" accept="application/pdf,.pdf" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadCoa(l.id, f); e.target.value = ''; }} />
                       {l.hasCoaDoc
@@ -553,12 +626,91 @@ function Lots({ board, api, token, canEdit, reload, initialFilter }: { board: Bo
                 </td>
               </tr>
             );})}
-            {filtres.length === 0 && <tr><td colSpan={10} className="px-4 py-10 text-center text-slate-400">{board.lots.length === 0 ? <>Aucun lot. {canEdit && 'Clique « + Lot ».'}</> : 'Aucun lot ne correspond aux filtres.'}</td></tr>}
+            {filtres.length === 0 && <tr><td colSpan={11} className="px-4 py-10 text-center text-slate-400">{board.lots.length === 0 ? <>Aucun lot. {canEdit && 'Clique « + Lot ».'}</> : 'Aucun lot ne correspond aux filtres.'}</td></tr>}
           </tbody>
         </table>
       </div>
       {editing && <LotModal draft={editing} setDraft={setEditing} materiaux={board.materiaux} references={board.references} onClose={() => setEditing(null)} api={api} />}
+      {histo && <HistoriqueCoaModal lot={histo} token={token} onClose={() => setHisto(null)} />}
     </div>
+  );
+}
+
+// Historique des certificats d'un lot : versions remplacées ou retirées, toujours consultables.
+function HistoriqueCoaModal({ lot, token, onClose }: { lot: Lot; token: string | null; onClose: () => void }) {
+  const [versions, setVersions] = useState<any[] | null>(null);
+  useEffect(() => {
+    let vivant = true;
+    fetch(`${API_URL}/api/coa/lots/${lot.id}/versions`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(v => { if (vivant) setVersions(v); })
+      .catch(() => { if (vivant) setVersions([]); });
+    return () => { vivant = false; };
+  }, [lot.id, token]);
+  const voir = async (url: string) => {
+    const r = await fetch(`${API_URL}${url}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) return alert('Document indisponible.');
+    window.open(URL.createObjectURL(await r.blob()), '_blank');
+  };
+  const quand = (v: any) => v ? new Date(v).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h4 className="font-semibold text-slate-800">Historique des certificats · lot {lot.numeroLot}</h4>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-2">
+          {lot.hasCoaDoc && (
+            <div className="flex items-center justify-between gap-3 border border-green-200 bg-green-50 rounded-lg px-3 py-2">
+              <div>
+                <div className="text-sm font-semibold text-green-800">Version en vigueur {versions?.length ? `(v${versions.length + 1})` : ''}</div>
+                <div className="text-xs text-slate-600">{lot.coaFichier || 'certificat.pdf'}</div>
+              </div>
+              <button onClick={() => voir(`/api/coa/lots/${lot.id}/document`)} className="text-xs font-semibold text-green-700 hover:underline whitespace-nowrap">Ouvrir</button>
+            </div>
+          )}
+          {versions === null && <div className="text-sm text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Chargement…</div>}
+          {versions?.map((v, i) => (
+            <div key={v.id} className="flex items-center justify-between gap-3 border border-slate-200 rounded-lg px-3 py-2">
+              <div>
+                <div className="text-sm font-medium text-slate-700">Version {versions.length - i} <span className="font-normal text-slate-400">· {v.motif || 'archivée'}</span></div>
+                <div className="text-xs text-slate-500">{v.nomFichier}</div>
+                <div className="text-[11px] text-slate-400">Déposé par {v.deposePar || '—'} le {quand(v.deposeLe)} · archivé par {v.archivePar || '—'} le {quand(v.archiveLe)}</div>
+              </div>
+              <button onClick={() => voir(`/api/coa/versions/${v.id}/document`)} className="text-xs font-semibold text-blue-600 hover:underline whitespace-nowrap">Ouvrir</button>
+            </div>
+          ))}
+          {versions?.length === 0 && !lot.hasCoaDoc && <div className="text-sm text-slate-400">Aucun certificat n'a jamais été déposé sur ce lot.</div>}
+          {versions?.length === 0 && lot.hasCoaDoc && <div className="text-sm text-slate-400">Certificat d'origine : il n'a jamais été remplacé.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Saisie directe d'une date dans le tableau, sans ouvrir la fiche du lot.
+// Enregistre dès que la date est choisie ; en cas d'échec, on revient à la valeur d'origine.
+function DateInline({ lotId, champ, valeur, api, canEdit }: { lotId: number; champ: 'dateCommande' | 'dateReception'; valeur: string | null; api: any; canEdit: boolean }) {
+  const [v, setV] = useState(valeur ?? '');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setV(valeur ?? ''); }, [valeur]);   // resynchronise après rechargement (ou modif faite sur un autre poste)
+  if (!canEdit) return <span>{valeur ? formatDate(valeur) : '—'}</span>;
+  const save = async (nouvelle: string) => {
+    if (nouvelle === (valeur ?? '')) return;
+    setBusy(true);
+    const ok = await api('PATCH', `/api/coa/lots/${lotId}`, { [champ]: nouvelle });
+    if (!ok) setV(valeur ?? '');
+    setBusy(false);
+  };
+  return (
+    <input
+      type="date" value={v} disabled={busy}
+      onChange={e => { setV(e.target.value); save(e.target.value); }}
+      title={champ === 'dateCommande' ? 'Date du bon de commande — modifiable directement' : 'Date de réception — modifiable directement'}
+      className={cn('w-[128px] text-sm text-slate-600 bg-transparent border rounded px-1 py-0.5 outline-none transition-colors',
+        'border-transparent hover:border-slate-300 hover:bg-white focus:border-blue-500 focus:bg-white', busy && 'opacity-50')}
+    />
   );
 }
 
@@ -577,14 +729,23 @@ function PeremptionBadge({ iso }: { iso: string | null }) {
 
 function LotModal({ draft, setDraft, materiaux, references, onClose, api }: { draft: any; setDraft: (d: any) => void; materiaux: Materiau[]; references: Reference[]; onClose: () => void; api: any }) {
   const set = (k: string, v: any) => setDraft({ ...draft, [k]: v });
-  // Sélection d'un matériau → pré-remplit fournisseur / réf interne / réf externe depuis sa fiche référence.
+  // Fournisseurs connus pour la matière sélectionnée (proposés dans la liste, plus de choix arbitraire).
+  const refsMateriau = references.filter(r => String(r.materiauId) === String(draft.materiauId));
+  // Sélection d'un matériau : on ne pré-remplit que s'il n'existe qu'UN fournisseur pour cette matière.
   const onMateriau = (v: string) => {
-    const ref = references.find(r => String(r.materiauId) === String(v));
+    const refs = references.filter(r => String(r.materiauId) === String(v));
+    const ref = refs.length === 1 ? refs[0] : undefined;
     setDraft({ ...draft, materiauId: v, ...(ref ? { fournisseur: ref.fournisseur || draft.fournisseur, referenceInterne: ref.refInterne ?? draft.referenceInterne, referenceClient: ref.refClient ?? draft.referenceClient } : {}) });
+  };
+  // Choix d'un fournisseur connu : ses références internes / client suivent.
+  const onFournisseur = (v: string) => {
+    const ref = refsMateriau.find(r => r.fournisseur === v);
+    setDraft({ ...draft, fournisseur: v, ...(ref ? { referenceInterne: ref.refInterne ?? '', referenceClient: ref.refClient ?? '' } : {}) });
   };
   const num = (v: any) => v === '' || v === null ? null : Number(v);
   const save = async () => {
     if (!draft.numeroLot || !draft.fournisseur) return alert('Numéro de lot et fournisseur requis.');
+    if (!draft.datePeremption) return alert('La date de péremption est obligatoire : sans elle, le lot n\'apparaîtrait dans aucune alerte.');
     const payload = {
       materiauId: draft.materiauId === '' ? null : Number(draft.materiauId), numeroLot: draft.numeroLot, fournisseur: draft.fournisseur,
       referenceInterne: draft.referenceInterne, referenceClient: draft.referenceClient, numeroCommande: draft.numeroCommande,
@@ -612,13 +773,18 @@ function LotModal({ draft, setDraft, materiaux, references, onClose, api }: { dr
               {materiaux.map(m => <option key={m.id} value={m.id}>{m.code} · {m.libelle}</option>)}
             </select></label>
           {Field({ label: 'N° de lot *', k: 'numeroLot' })}
-          {Field({ label: 'Fournisseur *', k: 'fournisseur' })}
+          <label className="block"><span className="text-xs font-medium text-slate-500">Fournisseur *</span>
+            <input list="coa-fournisseurs" value={draft.fournisseur ?? ''} onChange={e => onFournisseur(e.target.value)}
+              placeholder={refsMateriau.length > 1 ? `${refsMateriau.length} fournisseurs connus — choisir` : undefined}
+              className="mt-1 w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500" />
+            <datalist id="coa-fournisseurs">{refsMateriau.map(r => <option key={r.id} value={r.fournisseur} />)}</datalist>
+          </label>
           {Field({ label: 'N° de commande', k: 'numeroCommande' })}
           {Field({ label: 'Référence interne', k: 'referenceInterne' })}
           {Field({ label: 'Référence client', k: 'referenceClient' })}
           {Field({ label: 'Date commande', k: 'dateCommande', type: 'date' })}
           {Field({ label: 'Date réception', k: 'dateReception', type: 'date' })}
-          {Field({ label: 'Date péremption', k: 'datePeremption', type: 'date' })}
+          {Field({ label: 'Date péremption *', k: 'datePeremption', type: 'date' })}
           <label className="block"><span className="text-xs font-medium text-slate-500">Quantité</span>
             <div className="mt-1 flex gap-1">
               <input type="number" value={draft.quantiteG ?? ''} onChange={e => set('quantiteG', e.target.value)} className="w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500" />
@@ -643,6 +809,26 @@ function Parametres({ board, api, canEdit }: { board: Board; api: any; canEdit: 
   const [mat, setMat] = useState({ code: '', libelle: '', seuilLossDrying: '', lossDryingApplicable: true });
   const [ref, setRef] = useState({ materiauId: '', fournisseur: '', refInterne: '', refClient: '' });
   const matById = useMemo(() => Object.fromEntries(board.materiaux.map(m => [m.id, m])), [board.materiaux]);
+  // Fiche matière : quels lots (n° de lot + dates + CoA) sont rattachés à chaque matériau.
+  const [openMat, setOpenMat] = useState<number | null>(null);
+  const lotsParMat = useMemo(() => {
+    const m = new Map<number, Lot[]>();
+    for (const l of board.lots) if (l.materiauId != null) { const a = m.get(l.materiauId) ?? []; a.push(l); m.set(l.materiauId, a); }
+    // Les plus récents en haut (réception, à défaut commande).
+    for (const a of m.values()) a.sort((x, y) => String(y.dateReception ?? y.dateCommande ?? '').localeCompare(String(x.dateReception ?? x.dateCommande ?? '')));
+    return m;
+  }, [board.lots]);
+
+  const [editMat, setEditMat] = useState<any | null>(null);
+  const saveMat = async () => {
+    if (!editMat.code || !editMat.libelle) return alert('Code et libellé requis.');
+    const ok = await api('PATCH', `/api/coa/materiaux/${editMat.id}`, {
+      code: editMat.code, libelle: editMat.libelle,
+      seuilLossDrying: editMat.seuilLossDrying === '' ? null : Number(editMat.seuilLossDrying),
+      lossDryingApplicable: editMat.lossDryingApplicable,
+    });
+    if (ok) setEditMat(null);
+  };
 
   const addMat = async () => {
     if (!mat.code || !mat.libelle) return alert('Code et libellé requis.');
@@ -664,24 +850,86 @@ function Parametres({ board, api, canEdit }: { board: Board; api: any; canEdit: 
         <div className="px-4 py-3 border-b border-slate-100 font-semibold text-slate-800">Matériaux <span className="text-xs font-normal text-slate-400">· {board.materiaux.length}</span></div>
         <table className="w-full text-sm">
           <thead><tr className="bg-slate-50 text-left text-[11px] uppercase text-slate-500">
-            <th className="px-4 py-2">Code</th><th className="px-4 py-2">Libellé</th><th className="px-4 py-2 text-right">Seuil loss drying</th><th className="px-4 py-2">Loss drying ?</th><th className="px-4 py-2"></th>
+            <th className="px-4 py-2">Code</th><th className="px-4 py-2">Libellé</th><th className="px-4 py-2 text-right">Seuil loss drying</th><th className="px-4 py-2">Loss drying ?</th><th className="px-4 py-2">Lots reçus</th><th className="px-4 py-2"></th>
           </tr></thead>
           <tbody className="divide-y divide-slate-100">
-            {board.materiaux.map(m => (
-              <tr key={m.id} className="hover:bg-slate-50">
-                <td className="px-4 py-2 font-mono text-xs text-slate-700">{m.code}</td>
-                <td className="px-4 py-2 text-slate-700">{m.libelle}</td>
-                <td className="px-4 py-2 text-right text-slate-600">{m.seuilLossDrying ?? '—'}{m.seuilLossDrying != null ? ' %' : ''}</td>
-                <td className="px-4 py-2 text-slate-600">{m.lossDryingApplicable ? 'Oui' : 'Non'}</td>
-                <td className="px-4 py-2 text-right">{canEdit && <button onClick={() => confirm(`Supprimer le matériau ${m.code} ? (ses références et lots liés seront affectés)`) && api('DELETE', `/api/coa/materiaux/${m.id}`)} className="p-1 text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>}</td>
+            {board.materiaux.map(m => {
+              const lots = lotsParMat.get(m.id) ?? [];
+              const ouvert = openMat === m.id;
+              const enEdition = editMat?.id === m.id;
+              return (
+              <React.Fragment key={m.id}>
+              <tr className="hover:bg-slate-50">
+                {enEdition ? (<>
+                  <td className="px-4 py-2"><input value={editMat.code} onChange={e => setEditMat({ ...editMat, code: e.target.value })} className="w-full text-xs border border-slate-300 rounded px-2 py-1 font-mono" /></td>
+                  <td className="px-4 py-2"><input value={editMat.libelle} onChange={e => setEditMat({ ...editMat, libelle: e.target.value })} className="w-full text-xs border border-slate-300 rounded px-2 py-1" /></td>
+                  <td className="px-4 py-2"><input type="number" value={editMat.seuilLossDrying} onChange={e => setEditMat({ ...editMat, seuilLossDrying: e.target.value })} className="w-full text-xs border border-slate-300 rounded px-2 py-1 text-right" /></td>
+                  <td className="px-4 py-2"><label className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={editMat.lossDryingApplicable} onChange={e => setEditMat({ ...editMat, lossDryingApplicable: e.target.checked })} /> applicable</label></td>
+                </>) : (<>
+                  <td className="px-4 py-2 font-mono text-xs text-slate-700">{m.code}</td>
+                  <td className="px-4 py-2 text-slate-700">{m.libelle}</td>
+                  <td className="px-4 py-2 text-right text-slate-600">{m.seuilLossDrying ?? '—'}{m.seuilLossDrying != null ? ' %' : ''}</td>
+                  <td className="px-4 py-2 text-slate-600">{m.lossDryingApplicable ? 'Oui' : 'Non'}</td>
+                </>)}
+                <td className="px-4 py-2">
+                  <button onClick={() => setOpenMat(ouvert ? null : m.id)} disabled={!lots.length}
+                    title={lots.length ? 'Voir les lots de cette matière (n° de lot, dates, CoA)' : 'Aucun lot enregistré pour cette matière'}
+                    className={cn('inline-flex items-center gap-1 text-xs font-medium rounded px-2 py-1', lots.length ? 'text-blue-600 hover:bg-blue-50' : 'text-slate-400 cursor-default')}>
+                    {lots.length ? (ouvert ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />) : null}
+                    {lots.length || '—'}
+                  </button>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">{canEdit && (enEdition
+                  ? <>
+                      <button onClick={saveMat} className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-100 rounded font-medium">Enregistrer</button>
+                      <button onClick={() => setEditMat(null)} className="text-xs px-2 py-1 text-slate-500 hover:bg-slate-100 rounded">Annuler</button>
+                    </>
+                  : <>
+                      <button onClick={() => setEditMat({ id: m.id, code: m.code, libelle: m.libelle, seuilLossDrying: m.seuilLossDrying ?? '', lossDryingApplicable: m.lossDryingApplicable })} title="Modifier ce matériau" className="p-1 text-slate-400 hover:text-blue-600"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => confirm(`Supprimer le matériau ${m.code} ?\n\n(impossible s'il est encore utilisé par des lots)`) && api('DELETE', `/api/coa/materiaux/${m.id}`)} className="p-1 text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </>)}</td>
               </tr>
-            ))}
+              {ouvert && (
+                <tr className="bg-slate-50/70">
+                  <td colSpan={6} className="px-4 py-3">
+                    <div className="text-[11px] font-semibold uppercase text-slate-500 mb-2">Lots de {m.code} · {lots.length}</div>
+                    <div className="bg-white border border-slate-200 rounded-lg overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead><tr className="bg-slate-50 text-left text-[10px] uppercase text-slate-500">
+                          <th className="px-3 py-1.5">N° lot</th><th className="px-3 py-1.5">Fournisseur</th><th className="px-3 py-1.5">N° commande</th>
+                          <th className="px-3 py-1.5">Commande</th><th className="px-3 py-1.5">Réception</th><th className="px-3 py-1.5">Péremption</th>
+                          <th className="px-3 py-1.5 text-right">Quantité</th><th className="px-3 py-1.5">CoA</th>
+                        </tr></thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {lots.map(l => (
+                            <tr key={l.id} className="hover:bg-slate-50">
+                              <td className="px-3 py-1.5 font-mono text-slate-700">{l.numeroLot}</td>
+                              <td className="px-3 py-1.5 text-slate-600">{l.fournisseur}</td>
+                              <td className="px-3 py-1.5 font-mono text-slate-500">{l.numeroCommande || '—'}</td>
+                              <td className="px-3 py-1.5 text-slate-600">{l.dateCommande ? formatDate(l.dateCommande) : '—'}</td>
+                              <td className="px-3 py-1.5 text-slate-600">{l.dateReception ? formatDate(l.dateReception) : '—'}</td>
+                              <td className="px-3 py-1.5"><div className="flex items-center gap-1.5"><span className="text-slate-600">{l.datePeremption ? formatDate(l.datePeremption) : '—'}</span><PeremptionBadge iso={l.datePeremption} /></div></td>
+                              <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums">{fmtQty(l.quantiteG, l.quantiteUnite)}</td>
+                              <td className="px-3 py-1.5">{l.hasCoaDoc
+                                ? <span className="inline-flex items-center gap-1 text-green-700"><FileText className="w-3 h-3" /> oui</span>
+                                : <span className="inline-flex items-center gap-1 text-red-600"><XCircle className="w-3 h-3" /> manquant</span>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              </React.Fragment>
+            );})}
             {canEdit && (
               <tr className="bg-blue-50/40">
                 <td className="px-4 py-2"><input value={mat.code} onChange={e => setMat({ ...mat, code: e.target.value })} placeholder="MP-XXX" className="w-full text-xs border border-slate-300 rounded px-2 py-1 font-mono" /></td>
                 <td className="px-4 py-2"><input value={mat.libelle} onChange={e => setMat({ ...mat, libelle: e.target.value })} placeholder="Libellé" className="w-full text-xs border border-slate-300 rounded px-2 py-1" /></td>
                 <td className="px-4 py-2"><input type="number" value={mat.seuilLossDrying} onChange={e => setMat({ ...mat, seuilLossDrying: e.target.value })} placeholder="ex. 5" className="w-full text-xs border border-slate-300 rounded px-2 py-1 text-right" /></td>
                 <td className="px-4 py-2"><label className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={mat.lossDryingApplicable} onChange={e => setMat({ ...mat, lossDryingApplicable: e.target.checked })} /> applicable</label></td>
+                <td className="px-4 py-2"></td>
                 <td className="px-4 py-2 text-right"><button onClick={addMat} className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-100 rounded font-medium">+ Ajouter</button></td>
               </tr>
             )}
@@ -703,7 +951,7 @@ function Parametres({ board, api, canEdit }: { board: Board; api: any; canEdit: 
                 <td className="px-4 py-2 text-slate-600">{r.fournisseur}</td>
                 <td className="px-4 py-2 text-slate-600">{r.refInterne || '—'}</td>
                 <td className="px-4 py-2 text-slate-600">{r.refClient || '—'}</td>
-                <td className="px-4 py-2 text-right">{canEdit && <button onClick={() => api('DELETE', `/api/coa/references/${r.id}`)} className="p-1 text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>}</td>
+                <td className="px-4 py-2 text-right">{canEdit && <button onClick={() => confirm(`Supprimer la référence ${matById[r.materiauId]?.code || ''} · ${r.fournisseur} ?`) && api('DELETE', `/api/coa/references/${r.id}`)} className="p-1 text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>}</td>
               </tr>
             ))}
             {canEdit && (

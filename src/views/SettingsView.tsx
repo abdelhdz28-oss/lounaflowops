@@ -309,7 +309,7 @@ export function SettingsView() {
   };
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="flex flex-wrap justify-between items-center gap-2 mb-6">
         <h3 className="text-lg font-semibold text-slate-800">Configuration des Produits & Leadtimes</h3>
         <div className="flex items-center gap-2">
@@ -512,10 +512,24 @@ export function SettingsView() {
             Enregistrer
           </button>
         </div>
-        <p className="text-sm text-slate-500 mb-4">
+        <p className="text-sm text-slate-500 mb-3">
           Types de produits, références et variantes de conditionnement. Utilisé pour l'auto-remplissage des fiches lot et le calcul du rendement de production.
           Cochez « Carte lead time » sur un produit pour créer automatiquement sa fiche de délais (en haut de page) à l'enregistrement.
         </p>
+        <p className="text-sm text-slate-600 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 mb-3">
+          <b>« Contenants par boîte »</b> sert à calculer les boîtes produites de chaque lot : 3 flacons par boîte,
+          1 ou 2 seringues selon la référence. Sans ce nombre, le calcul est désactivé et les boîtes doivent être saisies à la main.
+        </p>
+        {(() => {
+          const sansCondit = localCatalog.filter(e => !(Number(e.condit) > 0));
+          if (!sansCondit.length) return null;
+          return (
+            <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+              <b>{sansCondit.length} produit(s) sans conditionnement</b> — le calcul des boîtes est désactivé pour leurs lots :{' '}
+              {sansCondit.map(e => e.name || e.ref || e.type || '(sans nom)').join(', ')}
+            </p>
+          );
+        })()}
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -523,7 +537,7 @@ export function SettingsView() {
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Type</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Nom</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Référence</th>
-                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Cond./boîte</th>
+                <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider" title="Nombre de flacons ou de seringues dans une boîte">Contenants par boîte</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contenant</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Volume contenant (mL)</th>
                 <th className="py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Carte lead time</th>
@@ -568,7 +582,9 @@ export function SettingsView() {
                       min="0"
                       value={entry.condit}
                       onChange={e => handleCatalogChange(idx, 'condit', e.target.value)}
-                      className="w-20 px-2 py-1 text-sm border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                      title={Number(entry.condit) > 0 ? 'Nombre de contenants dans une boîte' : 'À renseigner : sans ce nombre, les boîtes produites ne se calculent pas'}
+                      className={cn('w-20 px-2 py-1 text-sm border rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none',
+                        Number(entry.condit) > 0 ? 'border-slate-300' : 'border-amber-400 bg-amber-50')}
                     />
                   </td>
                   <td className="py-2 px-3">

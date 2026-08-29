@@ -614,3 +614,42 @@ export const PRODUCT_CATALOG = [
   { name: 'ESSENTYAL VOLUME', ref: 'DF-HAR2-1U' },
   { name: 'ESSENTYAL EXTREME', ref: 'DF-HAR3-1U' }
 ];
+
+// ---- Ancienneté d'un lot dans son étape actuelle ----
+// Répond à « depuis combien de temps ce lot n'a pas bougé ? », que rien ne permettait de voir jusqu'ici.
+// Renvoie le nombre de jours (null si inconnu) et un libellé prêt à afficher.
+export function ageEtapeLot(stageSince?: string | null): { j: number | null; texte: string } {
+  if (!stageSince) return { j: null, texte: '—' };
+  const t = new Date(stageSince).getTime();
+  if (isNaN(t)) return { j: null, texte: '—' };
+  const j = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+  return { j, texte: j === 0 ? "aujourd'hui" : j === 1 ? '1 jour' : `${j} jours` };
+}
+
+// ---- Boîtes produites : conformes ÷ conditionnement du produit ----
+// 3 flacons par boîte, 1 ou 2 seringues selon la référence : l'information est déjà au catalogue.
+// La valeur peut être forcée à la main (boîte incomplète, casse) ; on le signale alors à l'écran.
+export function boitesProduites(
+  batch: { conform?: number; sold?: number; sold_manuel?: boolean; reference?: string; product?: string },
+  catalogue: { ref: string; name: string; condit: number; contenant: string }[]
+): { valeur: number | null; calculee: number | null; forcee: boolean; condit: number; contenant: string } {
+  const entree = catalogue.find(p => p.ref === batch.reference) || catalogue.find(p => p.name === batch.product);
+  const condit = entree?.condit && entree.condit > 0 ? entree.condit : 0;
+  const contenant = (entree?.contenant || '').toUpperCase() === 'SERINGUE' ? 'seringues' : 'flacons';
+  const conformes = Number(batch.conform) || 0;
+  const calculee = condit > 0 && conformes > 0 ? Math.floor(conformes / condit) : null;
+  const forcee = !!batch.sold_manuel;
+  const valeur = forcee ? (Number(batch.sold) || 0) : calculee;
+  return { valeur, calculee, forcee, condit, contenant };
+}
+
+// Quantité théorique du lot, exprimée en contenants : boîtes cible × conditionnement.
+export function quantiteTheorique(
+  batch: { boxesTarget?: number; reference?: string; product?: string },
+  catalogue: { ref: string; name: string; condit: number; contenant: string }[]
+): number | null {
+  const entree = catalogue.find(p => p.ref === batch.reference) || catalogue.find(p => p.name === batch.product);
+  const condit = entree?.condit && entree.condit > 0 ? entree.condit : 0;
+  const cible = Number(batch.boxesTarget) || 0;
+  return condit > 0 && cible > 0 ? cible * condit : null;
+}

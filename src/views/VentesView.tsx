@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
-import { Plus, Trash2, Loader2, ChevronUp, ChevronDown, ChevronsUpDown, RefreshCw, FileDown, Archive } from 'lucide-react';
+import { Plus, Trash2, Loader2, ChevronUp, ChevronDown, ChevronsUpDown, RefreshCw, FileDown, Archive, Camera, History, CalendarPlus, X, RotateCcw } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { MultiSelect } from '../components/MultiSelect';
 
@@ -27,9 +27,11 @@ export function VentesView() {
   const [odooRows, setOdooRows] = useState<OdooRow[]>([]);
   const [catalog, setCatalog] = useState<Record<string, string>>({});
   const [year, setYear] = useState<number>(new Date().getFullYear());
-  const [tab, setTab] = useState<'pilotage' | 'forecast' | 'realise' | 'registre'>('pilotage');
+  const [tab, setTab] = useState<'pilotage' | 'forecast' | 'realise' | 'registre' | 'client'>('pilotage');
   const [loading, setLoading] = useState(true);
   const [odooLoading, setOdooLoading] = useState(false);
+  const [revOpen, setRevOpen] = useState(false);
+  const [revKey, setRevKey] = useState(0);   // force le rechargement de la liste des révisions
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -62,7 +64,7 @@ export function VentesView() {
   // Totaux mensuels Odoo (réalisé HT) dérivés du détail par produit.
   const odoo = useMemo(() => { const m = Array(12).fill(0); for (const r of odooRows) for (let i = 0; i < 12; i++) m[i] += r.months[i] || 0; return m; }, [odooRows]);
 
-  if (loading) return <div className="p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (loading) return <div className="p-4 sm:p-6 lg:p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
 
   const fMonthly = monthlyCA(data.forecast);
   const fTotal = fMonthly.reduce((a, b) => a + b, 0);
@@ -78,21 +80,82 @@ export function VentesView() {
     await load();
   };
 
+  // Fige l'état actuel de l'année sous un nom (V1 budget, V2 après comité…).
+  const figerRevision = async () => {
+    const nom = prompt(`Nom de cette révision du forecast ${year} ?\n(ex. « V1 budget », « V2 après comité de mars »)`);
+    if (!nom || !nom.trim()) return;
+    const commentaire = prompt('Commentaire (facultatif) : pourquoi cette révision ?') || null;
+    const ok = await api('POST', '/api/ventes/revisions', { year, nom: nom.trim(), commentaire });
+    if (ok) { setRevKey(k => k + 1); alert(`Révision « ${nom.trim()} » figée. Le forecast ${year} reste modifiable.`); }
+  };
+  // Prépare l'année suivante : structure reprise, 12 mois vides.
+  const preparerAnneeSuivante = async () => {
+    const cible = year + 1;
+    if (!confirm(`Préparer le forecast ${cible} à partir de ${year} ?\n\nLes mêmes pays, produits, prix et codes Odoo seront repris, avec les 12 mois vides à remplir.\nLe forecast ${year} n'est pas modifié.`)) return;
+    const ok = await api('POST', '/api/ventes/nouvelle-annee', { source: year, cible });
+    if (ok) { setYear(cible); alert(`Forecast ${cible} créé. Tu es maintenant dessus : il ne reste qu'à saisir les quantités.`); }
+  };
+
   const exportPDF = () => {
     const grp = new Map<string, { ca: number; qty: number }>();
     for (const v of data.forecast) { const k = v.pays || '(sans pays)'; if (!grp.has(k)) grp.set(k, { ca: 0, qty: 0 }); const g = grp.get(k)!; const q = v.qty.reduce((a, b) => a + (b || 0), 0); g.qty += q; g.ca += q * (v.prixUnitaire || 0); }
+    // Boîtes par pays et par mois (détail mensuel).
+    const paysMonths = new Map<string, number[]>();
+    for (const v of data.forecast) { const k = v.pays || '(sans pays)'; if (!paysMonths.has(k)) paysMonths.set(k, Array(12).fill(0)); const arr = paysMonths.get(k)!; for (let i = 0; i < 12; i++) arr[i] += v.qty[i] || 0; }
+    const grandBoxMonths = Array(12).fill(0); for (const arr of paysMonths.values()) for (let i = 0; i < 12; i++) grandBoxMonths[i] += arr[i];
+    const frB = (n: number) => n ? Math.round(n).toLocaleString('fr-FR') : '·';
+    const boxThs = MOIS.map(m => `<th class=r>${m}</th>`).join('');
+    const boxRows = [...paysMonths.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([p, arr]) => `<tr><td>${p}</td>${arr.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r><b>${frB(arr.reduce((a, b) => a + b, 0))}</b></td></tr>`).join('');
+    const boxTot = `<tr style="font-weight:bold;background:#f8fafc"><td>Total</td>${grandBoxMonths.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r>${frB(grandBoxMonths.reduce((a, b) => a + b, 0))}</td></tr>`;
+
+    // --- Quantités à vendre : par produit (tous pays), puis par pays et par produit ---
+    const nomProduit = (v: Vente) => v.produit || catalog[v.codeOdoo] || v.codeOdoo || '(sans produit)';
+    // Par produit, tous pays confondus : 12 mois + total boîtes + CA.
+    const prodMonths = new Map<string, { m: number[]; ca: number }>();
+    for (const v of data.forecast) {
+      const k = nomProduit(v);
+      if (!prodMonths.has(k)) prodMonths.set(k, { m: Array(12).fill(0), ca: 0 });
+      const g = prodMonths.get(k)!;
+      for (let i = 0; i < 12; i++) { g.m[i] += v.qty[i] || 0; g.ca += (v.qty[i] || 0) * (v.prixUnitaire || 0); }
+    }
+    const prodTotMonths = Array(12).fill(0); let prodTotCa = 0;
+    for (const g of prodMonths.values()) { for (let i = 0; i < 12; i++) prodTotMonths[i] += g.m[i]; prodTotCa += g.ca; }
+    const prodRows = [...prodMonths.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([p, g]) =>
+      `<tr><td>${p}</td>${g.m.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r><b>${frB(g.m.reduce((a, b) => a + b, 0))}</b></td><td class=r>${eur(g.ca)}</td></tr>`).join('');
+    const prodTotRow = `<tr style="font-weight:bold;background:#f8fafc"><td>Total</td>${prodTotMonths.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r>${frB(prodTotMonths.reduce((a, b) => a + b, 0))}</td><td class=r>${eur(prodTotCa)}</td></tr>`;
+    // Par pays, détaillé produit par produit (une ligne d'en-tête par pays).
+    const paysProd = new Map<string, Map<string, number[]>>();
+    for (const v of data.forecast) {
+      const kp = v.pays || '(sans pays)', kq = nomProduit(v);
+      if (!paysProd.has(kp)) paysProd.set(kp, new Map());
+      const mp = paysProd.get(kp)!;
+      if (!mp.has(kq)) mp.set(kq, Array(12).fill(0));
+      const arr = mp.get(kq)!;
+      for (let i = 0; i < 12; i++) arr[i] += v.qty[i] || 0;
+    }
+    const paysProdRows = [...paysProd.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([pays, mp]) => {
+      const sous = Array(12).fill(0);
+      for (const arr of mp.values()) for (let i = 0; i < 12; i++) sous[i] += arr[i];
+      const lignes = [...mp.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([prod, arr]) =>
+        `<tr><td style="padding-left:14px">${prod}</td>${arr.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r><b>${frB(arr.reduce((a, b) => a + b, 0))}</b></td></tr>`).join('');
+      const entete = `<tr style="background:#eef2f7;font-weight:bold"><td>${pays}</td>${sous.map(v => `<td class=r>${frB(v)}</td>`).join('')}<td class=r>${frB(sous.reduce((a, b) => a + b, 0))}</td></tr>`;
+      return entete + lignes;
+    }).join('');
     const max = Math.max(1, ...fMonthly, ...rMonthly), h = 150, bw = 46;
     const bars = MOIS.map((m, i) => { const x = i * bw + 34; const fh = fMonthly[i] / max * h, rh = rMonthly[i] / max * h; return `<rect x="${x}" y="${20 + h - fh}" width="17" height="${fh}" fill="#2563eb"/><rect x="${x + 19}" y="${20 + h - rh}" width="17" height="${rh}" fill="#16a34a"/><text x="${x + 18}" y="${20 + h + 12}" font-size="9" text-anchor="middle" fill="#64748b">${m}</text>`; }).join('');
     const svg = `<svg width="${MOIS.length * bw + 50}" height="${h + 40}"><text x="34" y="12" font-size="10" fill="#2563eb">■ Prévu</text><text x="90" y="12" font-size="10" fill="#16a34a">■ Réalisé</text>${bars}</svg>`;
     const mRows = MOIS.map((m, i) => `<tr><td>${m}</td><td class=r>${eur(fMonthly[i])}</td><td class=r>${eur(rMonthly[i])}</td><td class=r>${eur(rMonthly[i] - fMonthly[i])}</td></tr>`).join('');
     const pRows = [...grp.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([p, g]) => `<tr><td>${p}</td><td class=r>${g.qty.toLocaleString('fr-FR')}</td><td class=r>${eur(g.ca)}</td></tr>`).join('');
-    const html = `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Forecast Ventes ${year}</title><style>body{font-family:system-ui,Arial;max-width:900px;margin:24px auto;color:#1e293b}h1{font-size:20px}h2{font-size:14px;border-bottom:2px solid #e2e8f0;padding-bottom:4px;margin-top:22px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th,td{border:1px solid #e2e8f0;padding:5px 8px}.r{text-align:right}.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0}.kpi div{background:#f1f5f9;border-radius:8px;padding:8px 12px;font-size:12px}@media print{.np{display:none}}</style></head><body>
+    const html = `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Forecast Ventes ${year}</title><style>body{font-family:system-ui,Arial;max-width:900px;margin:24px auto;color:#1e293b}h1{font-size:20px}h2{font-size:14px;border-bottom:2px solid #e2e8f0;padding-bottom:4px;margin-top:22px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th,td{border:1px solid #e2e8f0;padding:5px 8px}.r{text-align:right}.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0}.kpi div{background:#f1f5f9;border-radius:8px;padding:8px 12px;font-size:12px}table.boxes{font-size:9px}table.boxes th,table.boxes td{padding:3px 4px}@media print{.np{display:none}}</style></head><body>
 <button class=np onclick="print()" style="float:right;padding:6px 12px;cursor:pointer">Imprimer / PDF</button>
 <h1>Forecast Ventes ${year} — situation CA</h1>
 <div class="kpi"><div>Forecast : <b>${eur(fTotal)}</b></div><div>Réalisé : <b>${eur(rTotal)}</b></div><div>% réalisé : <b>${fTotal ? Math.round(rTotal / fTotal * 100) : 0}%</b></div><div>Reste à faire : <b>${eur(fTotal - rTotal)}</b></div></div>
 <h2>Prévu vs Réalisé par mois</h2>${svg}
 <table><thead><tr><th>Mois</th><th class=r>Prévu</th><th class=r>Réalisé</th><th class=r>Écart</th></tr></thead><tbody>${mRows}<tr style="font-weight:bold;background:#f8fafc"><td>Total</td><td class=r>${eur(fTotal)}</td><td class=r>${eur(rTotal)}</td><td class=r>${eur(rTotal - fTotal)}</td></tr></tbody></table>
 <h2>Forecast par pays</h2><table><thead><tr><th>Pays</th><th class=r>Boîtes</th><th class=r>CA forecast</th></tr></thead><tbody>${pRows}</tbody></table>
+<h2>Boîtes par pays et par mois</h2><table class=boxes><thead><tr><th>Pays</th>${boxThs}<th class=r>Total</th></tr></thead><tbody>${boxRows}${boxTot}</tbody></table>
+<h2>Quantités à vendre par produit (toutes destinations)</h2><table class=boxes><thead><tr><th>Produit</th>${boxThs}<th class=r>Total boîtes</th><th class=r>CA forecast</th></tr></thead><tbody>${prodRows}${prodTotRow}</tbody></table>
+<h2>Quantités à vendre par pays et par produit</h2><table class=boxes><thead><tr><th>Pays / produit</th>${boxThs}<th class=r>Total boîtes</th></tr></thead><tbody>${paysProdRows}</tbody></table>
 </body></html>`;
     const w = window.open('', '_blank'); if (w) { w.document.write(html); w.document.close(); }
   };
@@ -105,13 +168,16 @@ export function VentesView() {
           <select value={year} onChange={e => setYear(Number(e.target.value))} className="text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500">
             {years.map(y => <option key={y} value={y}>{y}</option>)}
           </select>
+          {canEdit && !ro && <button onClick={figerRevision} title="Enregistrer une photo figée du forecast de cette année" className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Camera className="w-4 h-4" /> Figer une révision</button>}
+          <button onClick={() => setRevOpen(true)} title="Consulter, comparer ou restaurer les révisions figées" className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><History className="w-4 h-4" /> Révisions</button>
+          {canEdit && <button onClick={preparerAnneeSuivante} title={`Créer le forecast ${year + 1} à partir de ${year}`} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><CalendarPlus className="w-4 h-4" /> Préparer {year + 1}</button>}
           <button onClick={exportPDF} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><FileDown className="w-4 h-4" /> Export PDF</button>
           {canEdit && <button onClick={() => archiveYear(!ro)} className={cn('flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border', ro ? 'text-blue-700 bg-blue-50 border-blue-200 hover:bg-blue-100' : 'text-slate-700 bg-white border-slate-300 hover:bg-slate-50')}><Archive className="w-4 h-4" /> {ro ? 'Désarchiver' : 'Archiver'}</button>}
           <button onClick={load} className="text-slate-400 hover:text-blue-600" title="Rafraîchir"><RefreshCw className="w-4 h-4" /></button>
         </div>
       </div>
       <div className="flex gap-1 mb-4 border-b border-slate-200">
-        {([['pilotage', 'Pilotage'], ['forecast', 'Forecast'], ['realise', 'Réalisé'], ['registre', 'Registre commandes']] as const).map(([k, l]) => (
+        {([['pilotage', 'Pilotage'], ['forecast', 'Forecast'], ['realise', 'Réalisé'], ['registre', 'Registre commandes'], ['client', 'Vue client']] as const).map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} className={cn('px-4 py-2 text-sm font-medium border-b-2 -mb-px', tab === k ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700')}>{l}</button>
         ))}
       </div>
@@ -128,6 +194,192 @@ export function VentesView() {
         </div>
       )}
       {tab === 'registre' && <RegistreCommandes />}
+      {tab === 'client' && <ClientView rows={data.forecast} year={year} realizedMonths={data.realizedMonths} />}
+      {revOpen && <RevisionsModal year={year} token={token} actuel={data.forecast} canEdit={canEdit && !ro} cle={revKey} onClose={() => setRevOpen(false)} onRestore={load} />}
+    </div>
+  );
+}
+
+// ---------- Révisions du forecast : consulter, comparer à aujourd'hui, restaurer ----------
+interface RevisionInfo { id: number; year: number; nom: string; commentaire: string | null; totalCa: number; creePar: string | null; creeLe: string; nbLignes: number; }
+
+function RevisionsModal({ year, token, actuel, canEdit, cle, onClose, onRestore }:
+  { year: number; token: string | null; actuel: Vente[]; canEdit: boolean; cle: number; onClose: () => void; onRestore: () => void }) {
+  const [liste, setListe] = useState<RevisionInfo[] | null>(null);
+  const [choisie, setChoisie] = useState<any | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let vivant = true;
+    fetch(`${API_URL}/api/ventes/revisions?year=${year}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : []).then(v => { if (vivant) setListe(v); }).catch(() => { if (vivant) setListe([]); });
+    return () => { vivant = false; };
+  }, [year, token, cle]);
+
+  const ouvrir = async (id: number) => {
+    const r = await fetch(`${API_URL}/api/ventes/revisions/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) return alert('Révision illisible.');
+    setChoisie(await r.json());
+  };
+  const restaurer = async (rev: any) => {
+    if (!confirm(`Restaurer « ${rev.nom} » ?\n\nLes quantités du forecast ${year} reprendront les valeurs de cette révision.\nL'état actuel sera d'abord figé automatiquement, tu pourras donc revenir en arrière.`)) return;
+    setBusy(true);
+    const r = await fetch(`${API_URL}/api/ventes/revisions/${rev.id}/restore`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+    setBusy(false);
+    if (!r.ok) { const e = await r.json().catch(() => ({})); return alert(e.error || 'Échec de la restauration.'); }
+    const d = await r.json();
+    alert(`Restauration faite : ${d.restaurees} ligne(s) remise(s) à leur valeur d'origine.` + (d.absentes ? `\n${d.absentes} ligne(s) de la révision n'existent plus et ont été ignorées.` : ''));
+    onRestore(); onClose();
+  };
+
+  // Comparaison mois par mois, en euros : révision vs état actuel.
+  const comparaison = useMemo(() => {
+    if (!choisie) return null;
+    const rev = Array(12).fill(0), act = Array(12).fill(0);
+    for (const l of choisie.lignes as any[]) for (let i = 0; i < 12; i++) rev[i] += (l.qty[i] || 0) * (l.prixUnitaire || 0);
+    for (const v of actuel) for (let i = 0; i < 12; i++) act[i] += (v.qty[i] || 0) * (v.prixUnitaire || 0);
+    return { rev, act, totalRev: rev.reduce((a, b) => a + b, 0), totalAct: act.reduce((a, b) => a + b, 0) };
+  }, [choisie, actuel]);
+
+  const quand = (v: any) => v ? new Date(v).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h4 className="font-semibold text-slate-800">Révisions du forecast {year}</h4>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          {liste === null && <div className="text-sm text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Chargement…</div>}
+          {liste?.length === 0 && <div className="text-sm text-slate-500">Aucune révision figée pour {year}. Clique sur « Figer une révision » pour enregistrer l'état actuel : tu pourras ensuite comparer ce que tu prévoyais à ce moment-là avec la situation du jour.</div>}
+          {!!liste?.length && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead><tr className="bg-slate-50 text-left text-[11px] uppercase text-slate-500">
+                  <th className="px-3 py-2">Révision</th><th className="px-3 py-2">Figée le</th><th className="px-3 py-2">Par</th>
+                  <th className="px-3 py-2 text-right">CA forecast</th><th className="px-3 py-2 text-right">Lignes</th><th className="px-3 py-2"></th>
+                </tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {liste.map(r => (
+                    <tr key={r.id} className={cn('hover:bg-slate-50', choisie?.id === r.id && 'bg-blue-50/60')}>
+                      <td className="px-3 py-2"><div className="font-medium text-slate-800">{r.nom}</div>{r.commentaire && <div className="text-xs text-slate-500">{r.commentaire}</div>}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{quand(r.creeLe)}</td>
+                      <td className="px-3 py-2 text-slate-600">{r.creePar || '—'}</td>
+                      <td className="px-3 py-2 text-right text-slate-700 tabular-nums">{eur(r.totalCa)}</td>
+                      <td className="px-3 py-2 text-right text-slate-500 tabular-nums">{r.nbLignes}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        <button onClick={() => ouvrir(r.id)} className="text-xs font-semibold text-blue-600 hover:underline">Comparer</button>
+                        {canEdit && <button onClick={() => restaurer(r)} disabled={busy} title="Remettre le forecast dans cet état" className="ml-3 text-xs font-semibold text-slate-500 hover:text-amber-700 inline-flex items-center gap-1"><RotateCcw className="w-3 h-3" /> Restaurer</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {choisie && comparaison && (
+            <div>
+              <div className="text-sm font-semibold text-slate-800 mb-2">« {choisie.nom} » comparée au forecast d'aujourd'hui</div>
+              <div className="border border-slate-200 rounded-lg overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="bg-slate-50 text-left text-[10px] uppercase text-slate-500">
+                    <th className="px-2 py-1.5">Mois</th>{MOIS.map(m => <th key={m} className="px-2 py-1.5 text-right">{m}</th>)}<th className="px-2 py-1.5 text-right">Total</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    <tr><td className="px-2 py-1.5 text-slate-600">Révision</td>{comparaison.rev.map((v, i) => <td key={i} className="px-2 py-1.5 text-right tabular-nums text-slate-600">{eur(v)}</td>)}<td className="px-2 py-1.5 text-right font-semibold tabular-nums">{eur(comparaison.totalRev)}</td></tr>
+                    <tr><td className="px-2 py-1.5 text-slate-600">Aujourd'hui</td>{comparaison.act.map((v, i) => <td key={i} className="px-2 py-1.5 text-right tabular-nums text-slate-600">{eur(v)}</td>)}<td className="px-2 py-1.5 text-right font-semibold tabular-nums">{eur(comparaison.totalAct)}</td></tr>
+                    <tr className="bg-slate-50 font-semibold">
+                      <td className="px-2 py-1.5 text-slate-700">Écart</td>
+                      {comparaison.act.map((v, i) => { const d = v - comparaison.rev[i]; return <td key={i} className={cn('px-2 py-1.5 text-right tabular-nums', d > 0 ? 'text-green-700' : d < 0 ? 'text-red-600' : 'text-slate-400')}>{d ? (d > 0 ? '+' : '') + eur(d) : '·'}</td>; })}
+                      {(() => { const d = comparaison.totalAct - comparaison.totalRev; return <td className={cn('px-2 py-1.5 text-right tabular-nums', d > 0 ? 'text-green-700' : d < 0 ? 'text-red-600' : 'text-slate-400')}>{(d > 0 ? '+' : '') + eur(d)}</td>; })()}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1">Figée le {quand(choisie.creeLe)} par {choisie.creePar || '—'} · {(choisie.lignes as any[]).length} ligne(s)</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Vue client : extraction quantités seulement (boîtes) pour un pays (= un client). Aucun prix, aucun CA.
+function ClientView({ rows, year, realizedMonths }: { rows: Vente[]; year: number; realizedMonths?: boolean[] }) {
+  const countries = useMemo(() => [...new Set(rows.map(v => v.pays || '(sans pays)'))].sort((a, b) => a.localeCompare(b, 'fr')), [rows]);
+  const [pays, setPays] = useState<string>('');
+  useEffect(() => { if (!pays && countries.length) setPays(countries[0]); }, [countries, pays]);
+  const lignes = useMemo(() => rows.filter(v => (v.pays || '(sans pays)') === pays), [rows, pays]);
+  const monthsTot = useMemo(() => { const t = Array(12).fill(0); for (const v of lignes) for (let i = 0; i < 12; i++) t[i] += v.qty[i] || 0; return t; }, [lignes]);
+  const grandTot = monthsTot.reduce((a, b) => a + b, 0);
+  // CA total = somme (boîtes x prix unitaire) des lignes du Forecast de ce pays.
+  const caTot = lignes.reduce((a, v) => a + caRow(v), 0);
+  // CA mois par mois : boîtes du mois x prix unitaire (somme = caTot).
+  const caMonths = useMemo(() => { const t = Array(12).fill(0); for (const v of lignes) for (let i = 0; i < 12; i++) t[i] += (v.qty[i] || 0) * (v.prixUnitaire || 0); return t; }, [lignes]);
+  const fr = (n: number) => n ? Math.round(n).toLocaleString('fr-FR') : '·';
+  const realized = (i: number) => !!(realizedMonths && realizedMonths[i]);
+
+  const exportPDF = () => {
+    const gc = (i: number) => realized(i) ? ' g' : '';
+    const ths = MOIS.map((m, i) => `<th class="r${gc(i)}">${m}</th>`).join('');
+    const mRows = lignes.map(v => `<tr><td>${v.codeOdoo || '—'}</td><td>${v.produit || '—'}</td>${v.qty.map((q, i) => `<td class="r${gc(i)}">${fr(q)}</td>`).join('')}<td class=r><b>${fr(sumQty(v))}</b></td></tr>`).join('');
+    const caRowHtml = `<tr class=tot><td colspan=2>TOTAL ${pays} — chiffre d'affaires (€)</td>${caMonths.map((v, i) => `<td class="r${gc(i)}">${fr(Math.round(v))}</td>`).join('')}<td class=r>${eur(caTot)}</td></tr>`;
+    const totRow = `<tr class=tot><td colspan=2>TOTAL ${pays}</td>${monthsTot.map((v, i) => `<td class="r${gc(i)}">${fr(v)}</td>`).join('')}<td class=r>${fr(grandTot)}</td></tr>`;
+    const html = `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Prévisions ${pays} ${year}</title><style>body{font-family:system-ui,Arial;max-width:1000px;margin:24px auto;color:#1e293b}h1{font-size:20px}p.sub{color:#64748b;font-size:13px;margin-top:-6px}table{width:100%;border-collapse:collapse;font-size:10px;margin-top:12px}th,td{border:1px solid #e2e8f0;padding:4px 5px}.r{text-align:right}.tot{font-weight:bold;background:#f1f5f9}.g{background:#dcfce7;color:#15803d}@media print{.np{display:none}}</style></head><body>
+<button class=np onclick="print()" style="float:right;padding:6px 12px;cursor:pointer">Imprimer / PDF</button>
+<h1>Prévisions de commandes ${year} — ${pays}</h1>
+<p class=sub>Quantités prévisionnelles (boîtes) par produit et par mois, et chiffre d'affaires total. <span style="color:#15803d">■ vert = déjà facturé</span></p>
+<table><thead><tr><th>Code</th><th>Produit</th>${ths}<th class=r>Total</th></tr></thead><tbody>${mRows}${totRow}${caRowHtml}</tbody></table>
+</body></html>`;
+    const w = window.open('', '_blank'); if (w) { w.document.write(html); w.document.close(); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-slate-500">Client (pays) :</span>
+        <select value={pays} onChange={e => setPays(e.target.value)} className="text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500">
+          {countries.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <div className="text-sm text-slate-500 ml-2">{lignes.length} produit(s) · <b className="text-slate-800">{fr(grandTot)}</b> boîtes · CA <b className="text-slate-800">{eur(caTot)}</b> <span className="ml-1 text-xs text-slate-400">· <span className="inline-block w-2 h-2 rounded-sm bg-green-400 align-middle" /> déjà facturé</span></div>
+        <button onClick={exportPDF} disabled={!lignes.length} className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"><FileDown className="w-4 h-4" /> Export PDF (quantités)</button>
+      </div>
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-x-auto">
+        <table className="text-xs" style={{ tableLayout: 'fixed', width: 104 + 200 + 12 * 52 + 70 }}>
+          <colgroup><col style={{ width: 104 }} /><col style={{ width: 200 }} />{MOIS.map(m => <col key={m} style={{ width: 52 }} />)}<col style={{ width: 70 }} /></colgroup>
+          <thead><tr className="bg-slate-100 text-left text-[10px] uppercase text-slate-500">
+            <th className="px-2 py-2">Code Odoo</th><th className="px-2 py-2">Produit</th>
+            {MOIS.map((m, i) => <th key={m} className={cn('px-1 py-2 text-right', realized(i) && 'bg-green-100 text-green-700')}><span className="inline-block [writing-mode:vertical-rl] rotate-180 leading-none">{m}</span></th>)}
+            <th className="px-2 py-2 text-right">Total</th>
+          </tr></thead>
+          <tbody className="divide-y divide-slate-100">
+            {lignes.map(v => (
+              <tr key={v.id} className="hover:bg-slate-50">
+                <td className="px-2 py-1.5 font-mono text-[11px] text-slate-600 truncate">{v.codeOdoo || '—'}</td>
+                <td className="px-2 py-1.5 text-slate-700 truncate" title={v.produit}>{v.produit || '—'}</td>
+                {v.qty.map((q, i) => <td key={i} className={cn('px-1 py-1.5 text-right tabular-nums text-slate-600', realized(i) && 'bg-green-50 text-green-700 font-medium')}>{fr(q)}</td>)}
+                <td className="px-2 py-1.5 text-right font-semibold text-slate-800 tabular-nums">{fr(sumQty(v))}</td>
+              </tr>
+            ))}
+            {lignes.length === 0 && <tr><td colSpan={15} className="px-4 py-10 text-center text-slate-400">Aucune ligne pour ce pays.</td></tr>}
+          </tbody>
+          {lignes.length > 0 && (
+            <tfoot><tr className="bg-slate-800 text-white font-semibold">
+              <td className="px-2 py-2 uppercase text-[10px]" colSpan={2}>Total {pays} · boîtes</td>
+              {monthsTot.map((v, i) => <td key={i} className={cn('px-1 py-2 text-right tabular-nums', realized(i) && 'text-green-300')}>{fr(v)}</td>)}
+              <td className="px-2 py-2 text-right tabular-nums">{fr(grandTot)}</td>
+            </tr>
+            <tr className="bg-slate-700 text-slate-200 font-medium">
+              <td className="px-2 py-1.5 uppercase text-[10px]" colSpan={2}>Total {pays} · chiffre d'affaires (€)</td>
+              {caMonths.map((v, i) => <td key={i} className={cn('px-1 py-1.5 text-right tabular-nums text-[11px]', realized(i) && 'text-green-300')}>{fr(Math.round(v))}</td>)}
+              <td className="px-2 py-1.5 text-right tabular-nums">{eur(caTot)}</td>
+            </tr></tfoot>
+          )}
+        </table>
+      </div>
     </div>
   );
 }
@@ -199,7 +451,7 @@ function RegistreCommandes() {
     return 'bg-slate-100 text-slate-600';
   };
 
-  if (loading) return <div className="p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (loading) return <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
 
   return (
     <div className="space-y-3">

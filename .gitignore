@@ -12,3 +12,4 @@ lounaflow.db
 # Outillage local des agents (config perso + métriques) — ne pas versionner
 .claude/
 .claude-flow/
+.gstack/

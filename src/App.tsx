@@ -10,6 +10,9 @@ import { Loader2 } from 'lucide-react';
 
 // Vues chargées à la demande (code splitting) : chaque onglet n'est téléchargé
 // qu'à sa première ouverture, ce qui allège fortement le chargement initial.
+const AccueilView = lazy(() => import('./views/AccueilView').then(m => ({ default: m.AccueilView })));
+const EmailsView = lazy(() => import('./views/EmailsView').then(m => ({ default: m.EmailsView })));
+const PilotageView = lazy(() => import('./views/PilotageView').then(m => ({ default: m.PilotageView })));
 const DashboardView = lazy(() => import('./views/DashboardView').then(m => ({ default: m.DashboardView })));
 const KanbanView = lazy(() => import('./views/KanbanView').then(m => ({ default: m.KanbanView })));
 const PrepProdView = lazy(() => import('./views/PrepProdView').then(m => ({ default: m.PrepProdView })));
@@ -37,10 +40,11 @@ const AuditLogsView = lazy(() => import('./views/AuditLogsView').then(m => ({ de
 
 function AppContent() {
   const { loading } = useAppContext();
-  const { isAdmin, canEdit, hasView } = useAuth();
-  const [currentView, setCurrentView] = useState('dashboard');
+  const { isAdmin, canEdit, hasView, isOwner } = useAuth();
+  const [currentView, setCurrentView] = useState(isOwner ? 'accueil' : 'dashboard');
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [presentation, setPresentation] = useState(false);
+  const [navOpen, setNavOpen] = useState(false); // menu escamotable sur téléphone
   const [mayaOpen, setMayaOpen] = useState(false);
 
   // Mode présentation : plein écran + menu masqué + contenu agrandi (pour projeter à l'écran).
@@ -61,8 +65,8 @@ function AppContent() {
   };
 
   // « Utilisateurs » : admin uniquement. Les autres onglets dépendent des permissions de l'utilisateur.
-  const NAV_ORDER = ['dashboard', 'kanban', 'prepprod-suivi', 'forecasts', 'ventes', 'cockpit-dashboard', 'quality', 'deliveries', 'pl', 'opsreporting', 'odooerp', 'supplychain', 'coa-dashboard', 'qms-docs', 'data', 'audit', 'settings', 'users'];
-  const canSee = (view: string) => view === 'users' ? isAdmin : (view.startsWith('coa') ? hasView('coa') : view.startsWith('qms') ? hasView('qms') : view.startsWith('prepprod') ? hasView('prepprod') : view.startsWith('cockpit') ? hasView('cockpit') : view.startsWith('pl') ? hasView('pl') : hasView(view));
+  const NAV_ORDER = ['accueil', 'emails', 'pilotage', 'dashboard', 'kanban', 'prepprod-suivi', 'forecasts', 'ventes', 'cockpit-dashboard', 'quality', 'deliveries', 'pl', 'opsreporting', 'odooerp', 'supplychain', 'coa-dashboard', 'qms-docs', 'data', 'audit', 'settings', 'users'];
+  const canSee = (view: string) => (view === 'accueil' || view === 'emails') ? isOwner : view === 'users' ? isAdmin : (view.startsWith('coa') ? hasView('coa') : view.startsWith('qms') ? hasView('qms') : view.startsWith('prepprod') ? hasView('prepprod') : view.startsWith('cockpit') ? hasView('cockpit') : view.startsWith('pl') ? hasView('pl') : hasView(view));
   const activeView = canSee(currentView) ? currentView : (NAV_ORDER.find(canSee) ?? null);
 
   // Si l'onglet courant n'est plus autorisé, basculer sur le premier accessible.
@@ -80,6 +84,9 @@ function AppContent() {
   }
 
   const titles: Record<string, string> = {
+    'accueil': 'Accueil',
+    'emails': 'Emails',
+    'pilotage': "Aujourd'hui · poste de pilotage",
     'dashboard': 'Tracking Production',
     'kanban': 'Tracking Kanban',
     'prepprod-suivi': 'Préparation prod · Suivi BC',
@@ -123,7 +130,14 @@ function AppContent() {
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {!presentation && <Sidebar currentView={activeView || ''} onChangeView={setCurrentView} isAdmin={isAdmin} />}
+      {!presentation && (
+        <>
+          <Sidebar currentView={activeView || ''} onChangeView={(v) => { setCurrentView(v); setNavOpen(false); }}
+            isAdmin={isAdmin} mobileOpen={navOpen} onCloseMobile={() => setNavOpen(false)} />
+          {/* Voile : referme le menu d'un doigt sur téléphone */}
+          {navOpen && <div onClick={() => setNavOpen(false)} className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden" />}
+        </>
+      )}
 
       <main className="flex-1 flex flex-col min-w-0" style={{ zoom: presentation ? 1.3 : 1 }}>
         <Header
@@ -133,6 +147,7 @@ function AppContent() {
           presentation={presentation}
           onTogglePresentation={togglePresentation}
           onOpenMaya={() => setMayaOpen(true)}
+          onOpenMenu={() => setNavOpen(true)}
         />
 
         {!activeView && (
@@ -145,6 +160,9 @@ function AppContent() {
             <Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…
           </div>
         }>
+        {activeView === 'accueil' && <AccueilView onOpenBatch={setSelectedBatchId} onGoEmails={() => setCurrentView('emails')} />}
+        {activeView === 'emails' && <EmailsView />}
+        {activeView === 'pilotage' && <PilotageView onOpenBatch={setSelectedBatchId} />}
         {activeView === 'dashboard' && <DashboardView onOpenBatch={setSelectedBatchId} />}
         {activeView === 'kanban' && <KanbanView onOpenBatch={setSelectedBatchId} />}
         {activeView && activeView.startsWith('prepprod') && <PrepProdView view={activeView} onOpenBatch={setSelectedBatchId} />}
@@ -177,6 +195,7 @@ function AppContent() {
         <BatchDrawer
           batchId={selectedBatchId}
           onClose={() => setSelectedBatchId(null)}
+          onOpenCatalogue={() => { setSelectedBatchId(null); setCurrentView('settings'); }}
         />
       )}
     </div>

@@ -10,6 +10,7 @@ interface User {
   username: string;
   role: UserRole;
   permissions?: string[];
+  isOwner?: boolean;   // propriétaire des boîtes mail : onglets Accueil / Emails
 }
 
 interface AuthState {
@@ -22,6 +23,7 @@ interface AuthState {
   logout: () => void;
   canEdit: boolean;
   isAdmin: boolean;
+  isOwner: boolean;
   hasView: (view: string) => boolean;
 }
 
@@ -124,6 +126,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const canEdit = user?.role === 'editor' || user?.role === 'admin';
   const isAdmin = user?.role === 'admin';
+  // Onglets personnels (Accueil, Emails) : le serveur dit qui en est le propriétaire.
+  const isOwner = !!user?.isOwner;
   // L'admin voit tout ; sinon on se base sur les onglets attribués à l'utilisateur.
   const hasView = (view: string) => isAdmin || !!user?.permissions?.includes(view);
 
@@ -138,6 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       canEdit,
       isAdmin,
+      isOwner,
       hasView
     }}>
       {children}

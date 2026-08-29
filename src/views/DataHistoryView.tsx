@@ -78,7 +78,7 @@ export function DataHistoryView({ onOpenBatch }: DataHistoryViewProps) {
   );
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="flex items-center justify-between mb-6">
         <h3 className="text-lg font-semibold text-slate-800">Data Historique</h3>
         <span className="text-sm text-slate-400">{filtered.length} / {rows.length} lots</span>

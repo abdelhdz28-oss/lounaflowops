@@ -211,14 +211,14 @@ export function UsersView() {
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center justify-center">
+      <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center">
         <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
       </div>
     );
   }
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="max-w-4xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <div>

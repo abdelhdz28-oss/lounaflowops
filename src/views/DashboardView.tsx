@@ -4,7 +4,7 @@ import { cn } from '../utils/cn';
 import { Batch, FluxConfig } from '../types';
 import {
   PROCESS_STAGES, QUALITY_STATUSES, SCHEDULE_HEALTH, computeSampleMilestones, MilestoneState,
-  PRODUCTION_MILESTONES, computeMilestoneDates, milestoneStatus, defaultMilestones, formatDate
+  PRODUCTION_MILESTONES, computeMilestoneDates, milestoneStatus, defaultMilestones, formatDate, ageEtapeLot, boitesProduites
 } from '../constants';
 import { PackageCheck, Send, FileCheck, X, ChevronUp, ChevronDown } from 'lucide-react';
 
@@ -148,6 +148,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   const [filterQuality, setFilterQuality] = useState<string[]>(asArr(saved.filterQuality));
   const [filterHealth, setFilterHealth] = useState<string[]>(asArr(saved.filterHealth));
   const [filterProgress, setFilterProgress] = useState<string[]>(asArr(saved.filterProgress));
+  // Lots clôturés : archivés, donc masqués par défaut (choix mémorisé pour la session).
+  const [afficherClotures, setAfficherClotures] = useState<boolean>(!!saved.afficherClotures);
 
   // Sorting State
   const [sortColumn, setSortColumn] = useState<SortableColumn | null>(saved.sortColumn ?? 'startDate');
@@ -157,7 +159,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   useEffect(() => {
     const data = {
       filterId, filterProduct, filterClient, filterStep, filterStart, filterEnd,
-      filterDelivery, filterQuality, filterHealth, filterProgress, sortColumn, sortDirection
+      filterDelivery, filterQuality, filterHealth, filterProgress, sortColumn, sortDirection, afficherClotures
     };
     try { sessionStorage.setItem(DASHBOARD_FILTERS_KEY, JSON.stringify(data)); } catch { /* quota/full : ignore */ }
   }, [filterId, filterProduct, filterClient, filterStep, filterStart, filterEnd,
@@ -190,6 +192,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batchList, productCatalog]);
 
+  const clotures = batchList.filter(b => b?.cloture).length;
   const hasActiveFilters =
     filterId.length > 0 || filterProduct.length > 0 || filterClient.length > 0 || filterStep.length > 0 ||
     filterStart.length > 0 || filterEnd.length > 0 || filterDelivery.length > 0 ||
@@ -244,6 +247,8 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   // Apply filters to batches
   const filteredBatches = batchList.filter(b => {
     if (!b) return false;
+    // Les lots clôturés sont archivés : masqués sauf demande explicite.
+    if (b.cloture && !afficherClotures) return false;
 
     // Filtre = liste vide → tout passe ; sinon la valeur du lot doit être cochée.
     const matchesId = filterId.length === 0 || filterId.includes(b.id);
@@ -334,7 +339,7 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
   };
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="grid grid-cols-4 gap-6 mb-8">
         <KpiCard title="EN PRODUCTION" value={activeBatches} sub="Lots actifs" />
         <KpiCard title="ALERTES" value={riskBatches} sub="Critiques" valueColor="text-red-500" />
@@ -342,6 +347,13 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
         <KpiCard title="TESTS EN COURS" value={testsCount} sub="Qualité externe" />
       </div>
 
+      <div className="flex items-center justify-end mb-2">
+        <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+          <input type="checkbox" checked={afficherClotures} onChange={e => setAfficherClotures(e.target.checked)} className="h-4 w-4" />
+          Afficher les lots clôturés
+          {clotures > 0 && <span className="text-xs text-slate-400">({clotures})</span>}
+        </label>
+      </div>
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse min-w-[1000px]">
@@ -358,6 +370,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                 {renderHeader('OTD', 'health', 'w-28')}
                 <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-24 text-center">Jalons</th>
                 {renderHeader('Progression', 'progress', 'w-32')}
+                <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-28 text-right" title="Conformes ÷ conditionnement du produit">Boîtes produites</th>
+                <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-32">Responsable</th>
+                <th className="py-3 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-28" title="Depuis combien de temps le lot est à cette étape">Depuis</th>
               </tr>
               <tr className="bg-slate-50/50 border-b border-slate-200">
                 <th className="py-2 px-3"><ColumnFilter options={optId} selected={filterId} onChange={setFilterId} placeholder="Tous" /></th>
@@ -381,6 +396,9 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                   )}
                 </th>
                 <th className="py-2 px-3"><ColumnFilter options={optProgress} selected={filterProgress} onChange={setFilterProgress} placeholder="Tous" /></th>
+                <th className="py-2 px-3"></th>
+                <th className="py-2 px-3"></th>
+                <th className="py-2 px-3"></th>
               </tr>
             </thead>
             <tbody>
@@ -394,10 +412,11 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                     <tr 
                       key={b.id} 
                       onClick={() => onOpenBatch(b.id)}
-                      className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors"
+                      className={cn('border-b border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors', b.cloture && 'bg-slate-50/70 text-slate-400')}
                     >
-                      <td className="py-3 px-4 font-bold text-blue-600">
+                      <td className={cn('py-3 px-4 font-bold', b.cloture ? 'text-slate-400' : 'text-blue-600')}>
                         <div className="flex items-center gap-1.5 whitespace-nowrap">
+                          {b.cloture && <span title="Lot clôturé">🔒</span>}
                           <span className="whitespace-nowrap">{b.id}</span>
                           <SampleMilestonesIcons batch={b} />
                         </div>
@@ -436,12 +455,33 @@ export function DashboardView({ onOpenBatch }: DashboardViewProps) {
                         </div>
                         <div className="text-xs text-slate-500 mt-1">{(b.progress !== undefined && b.progress !== null) ? b.progress : 0}%</div>
                       </td>
+                      <td className="py-3 px-4 text-right tabular-nums">
+                        {(() => {
+                          const bo = boitesProduites(b, productCatalog as any);
+                          if (bo.valeur === null) return <span className="text-slate-300">—</span>;
+                          return (
+                            <span className="font-semibold text-slate-700" title={bo.forcee ? 'Valeur corrigée à la main' : `Calcul : ${b.conform} ${bo.contenant} ÷ ${bo.condit} par boîte`}>
+                              {bo.valeur.toLocaleString('fr-FR')}{bo.forcee && <span className="text-amber-500 ml-0.5">*</span>}
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td className="py-3 px-4 text-slate-600 text-sm">
+                        {b.responsable ? b.responsable : <span className="text-slate-300">non assigné</span>}
+                        {b.blocage_motif && <div className="text-[11px] text-red-600 truncate max-w-[8rem]" title={b.blocage_motif}>⛔ {b.blocage_motif}</div>}
+                      </td>
+                      <td className="py-3 px-4">
+                        {(() => {
+                          const a = ageEtapeLot(b.stage_since);
+                          return <span className={cn('text-xs font-semibold', a.j == null ? 'text-slate-400' : a.j >= 21 ? 'text-red-600' : a.j >= 10 ? 'text-amber-600' : 'text-slate-500')}>{a.texte}</span>;
+                        })()}
+                      </td>
                     </tr>
                   );
                 })
               ) : (
                 <tr>
-                  <td colSpan={11} className="py-8 text-center text-sm text-slate-400">
+                  <td colSpan={14} className="py-8 text-center text-sm text-slate-400">
                     Aucun lot ne correspond aux filtres actuels.
                   </td>
                 </tr>

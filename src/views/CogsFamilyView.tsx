@@ -164,8 +164,8 @@ export function CogsFamilyView() {
 
   const calc = useMemo(() => draft ? calcModel(draft) : null, [draft]);
 
-  if (loading) return <div className="p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
-  if (!models.length) return <div className="p-8 text-center text-slate-400 text-sm">Aucun modèle COGS. Le fichier cogs_seed.json est semé au 1ᵉʳ démarrage du serveur.</div>;
+  if (loading) return <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (!models.length) return <div className="p-4 sm:p-6 lg:p-8 text-center text-slate-400 text-sm">Aucun modèle COGS. Le fichier cogs_seed.json est semé au 1ᵉʳ démarrage du serveur.</div>;
   if (!draft || !calc) return null;
 
   const real = realCogs[draft.code];

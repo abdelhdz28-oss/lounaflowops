@@ -88,7 +88,7 @@ function useCockpit() {
 
 export function CockpitView({ view }: { view: string }) {
   const data = useCockpit();
-  if (data.loading) return <div className="p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (data.loading) return <div className="p-4 sm:p-6 lg:p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
   return (
     <div className="p-6 flex-1 overflow-auto bg-slate-50">
       {view === 'cockpit-nomenclature' ? <NomenclatureView /> : view === 'cockpit-familles' ? <CogsFamilyView /> : view === 'cockpit-cogs-filler' ? <CogsFillerView /> : view === 'cockpit-cogs' ? <CogsTab {...data} /> : <DashboardTab {...data} />}
@@ -313,6 +313,32 @@ function CogsTab({ products, lots, api, prodByCode, reload }: ReturnType<typeof 
   const [sort, setSort] = useState<{ k: string; dir: SortDir } | null>({ k: 'batchNumber', dir: 'desc' });
 
   const rows = useMemo(() => filtered.map(l => ({ l, c: lotCalc(l, prodByCode[l.productCode || '']) })), [filtered, prodByCode]);
+
+  // Synthèse des lots filtrés — agrégats globaux (et non moyennes de moyennes).
+  const tot = useMemo(() => {
+    let boxes = 0, sold = 0, theo = 0, filled = 0, rejected = 0, costs = 0, profitCh = 0, profitFr = 0, nProfit = 0;
+    rows.forEach(({ l, c }) => {
+      if (l.unitsSold) { // un lot sans vente n'a ni COGS ni rendement (cf. lotCalc)
+        sold += l.unitsSold; boxes += c.boxes; costs += c.totalCosts;
+        theo += l.unitsTheoretical || 0;
+      }
+      if (l.unitsFilled && l.unitsRejected != null) { filled += l.unitsFilled; rejected += l.unitsRejected; }
+      if (c.profitCh != null) { profitCh += c.profitCh; nProfit++; }
+      if (c.profitFr != null) profitFr += c.profitFr;
+    });
+    return {
+      boxes, sold, nLots: rows.length, nProfit,
+      rejectRate: filled ? rejected / filled : null,
+      yieldGlobal: theo ? sold / theo : null,
+      cogsUnit: sold ? costs / sold : null,
+      cogsBox: boxes ? costs / boxes : null,
+      profitCh: nProfit ? profitCh : null,
+      profitFr: nProfit ? profitFr : null,
+    };
+  }, [rows]);
+  const toneReject: Tone = tot.rejectRate == null ? 'na' : tot.rejectRate <= 0.03 ? 'ok' : tot.rejectRate <= 0.07 ? 'warn' : 'bad';
+  const toneYield: Tone = tot.yieldGlobal == null ? 'na' : tot.yieldGlobal >= 0.95 ? 'ok' : tot.yieldGlobal >= 0.9 ? 'warn' : 'bad';
+
   const sorted = useMemo(() => {
     if (!sort) return rows;
     const s = sort.dir === 'asc' ? 1 : -1;
@@ -353,6 +379,15 @@ function CogsTab({ products, lots, api, prodByCode, reload }: ReturnType<typeof 
           {canEdit && <button onClick={() => setShowProducts(s => !s)} className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 bg-white rounded-lg text-sm font-medium hover:bg-slate-50"><Settings2 className="w-4 h-4" /> Produits & prix</button>}
           {canEdit && <button onClick={newLot} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"><Plus className="w-4 h-4" /> Lot</button>}
         </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        <KpiCard title="Boîtes vendues" value={tot.boxes.toLocaleString('fr-FR')} sub={`${tot.sold.toLocaleString('fr-FR')} unités · ${tot.nLots} lot(s)`} tone="na" />
+        <KpiCard title="Taux de rejet" value={tot.rejectRate == null ? '—' : (Math.round(tot.rejectRate * 1000) / 10) + ' %'} sub="rejetés ÷ remplis" tone={toneReject} />
+        <KpiCard title="Rendement" value={pct(tot.yieldGlobal)} sub="vendus ÷ théoriques" tone={toneYield} />
+        <KpiCard title="COGS moyen / unité" value={eur2(tot.cogsUnit)} sub="coûts ÷ unités vendues" tone="na" />
+        <KpiCard title="COGS moyen / boîte" value={eur2(tot.cogsBox)} sub="coûts ÷ boîtes vendues" tone="na" />
+        <KpiCard title="Profit total (CH)" value={eur(tot.profitCh)} sub={tot.profitCh == null ? 'prix non renseignés' : `France : ${eur(tot.profitFr)} · ${tot.nProfit} lot(s)`} tone={tot.profitCh == null ? 'na' : tot.profitCh >= 0 ? 'ok' : 'bad'} />
       </div>
 
       {showProducts && <ProductsPanel products={products} api={api} canEdit={canEdit} />}

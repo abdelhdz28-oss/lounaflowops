@@ -149,7 +149,7 @@ export function AuditLogsView() {
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center justify-center min-h-[400px]">
+      <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center min-h-[400px]">
         <Loader2 className="w-8 h-8 animate-spin text-blue-600 mr-2" />
         <span className="text-slate-500 font-medium">Chargement du journal d'audit...</span>
       </div>
@@ -157,7 +157,7 @@ export function AuditLogsView() {
   }
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="max-w-6xl mx-auto space-y-6">
         
         {/* Résumé des statistiques d'audit */}

@@ -7,11 +7,13 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import AdmZip from 'adm-zip';
+import * as XLSX from 'xlsx';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { geminiUploadPdf, geminiGenerateJson, geminiDeleteFile } from './lib/gemini';
 import { resolveMoveTarget, reorderIds, extractBilanJson } from './lib/opsReporting';
+import { initMailTables, registerMailRoutes, startMailScheduler, emailsUrgents } from './lib/mail';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,7 +71,7 @@ interface JWTPayload {
 }
 
 // Onglets dont l'accès est attribuable par utilisateur (l'onglet « Utilisateurs » reste réservé admin).
-const ATTRIBUTABLE_VIEWS = ['dashboard', 'kanban', 'prepprod', 'forecasts', 'ventes', 'quality', 'mirage', 'deliveries', 'pl', 'opsreporting', 'odooerp', 'supplychain', 'coa', 'qms', 'data', 'audit', 'settings'];
+const ATTRIBUTABLE_VIEWS = ['pilotage', 'dashboard', 'kanban', 'prepprod', 'forecasts', 'ventes', 'quality', 'mirage', 'deliveries', 'pl', 'opsreporting', 'odooerp', 'supplychain', 'coa', 'qms', 'data', 'audit', 'settings'];
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
@@ -507,6 +509,12 @@ async function initDatabase() {
     // Refonte 3 axes : nouvelles colonnes (schedule_health n'est PAS stocké, calculé à la volée)
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS process_stage TEXT");
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS quality_status TEXT");
+    // Notification PRRC (libération) : trace du clic sur « Notifier Farid » + libération détectée sur SharePoint.
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS prrc_notified_at TIMESTAMP");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS prrc_notified_by TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS release_doc_url TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS release_doc_name TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS release_detected_at TIMESTAMP");
 
     // Table deliveries
     await client.query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS batchId TEXT NOT NULL DEFAULT ''");
@@ -530,6 +538,21 @@ async function initDatabase() {
 
     // Préparation prod : checklist documentaire par lot ({ taskId: true/false })
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS preptasks JSONB DEFAULT '{}'::jsonb");
+    // Fil de vie du lot : qui s'en occupe, depuis quand il est à cette étape, et ce qui le bloque.
+    await client.query("ALTER TABLE pl_clients ADD COLUMN IF NOT EXISTS email TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS responsable TEXT");
+    // Date d'enlèvement RÉELLE (la marchandise est partie ce jour-là) — distincte de la livraison souhaitée.
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS pickup_date DATE");
+    // Les boîtes produites se calculent (conformes ÷ conditionnement) ; ce drapeau signale une valeur forcée à la main.
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS sold_manuel BOOLEAN DEFAULT FALSE");
+    // Clôture : le lot est terminé, il sort des listes actives mais reste consultable.
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS cloture BOOLEAN DEFAULT FALSE");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS cloture_at TIMESTAMP");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS cloture_par TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS blocage_motif TEXT");
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS stage_since TIMESTAMP");
+    // Lots existants : on part de la dernière modification connue, faute de mieux, pour ne pas afficher « — » partout.
+    await client.query("UPDATE batches SET stage_since = COALESCE(updated_at, created_at) WHERE stage_since IS NULL");
 
     console.log('✅ Migrations de schéma terminées');
 
@@ -890,6 +913,11 @@ async function initDatabase() {
     `);
     // is_slip : un report d'échéance est-il un glissement à comptabiliser (true) ou une simple correction (false) ?
     await client.query(`ALTER TABLE ops_deadline_history ADD COLUMN IF NOT EXISTS is_slip BOOLEAN DEFAULT TRUE`);
+    // Archivage d'un projet : toujours motivé (terminé ou annulé), jamais une simple disparition.
+    await client.query(`ALTER TABLE ops_projects ADD COLUMN IF NOT EXISTS archive_statut TEXT`);
+    await client.query(`ALTER TABLE ops_projects ADD COLUMN IF NOT EXISTS archive_motif TEXT`);
+    await client.query(`ALTER TABLE ops_projects ADD COLUMN IF NOT EXISTS archive_at TIMESTAMP`);
+    await client.query(`ALTER TABLE ops_projects ADD COLUMN IF NOT EXISTS archive_par TEXT`);
     // Photo hebdomadaire des chiffres clés Ops → tendance semaine N vs N-1 dans le débrief.
     await client.query(`
       CREATE TABLE IF NOT EXISTS ops_kpi_snapshots (
@@ -1012,6 +1040,99 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Révisions du forecast : photo figée de toutes les lignes d'une année (V1 budget, V2 après comité…).
+    // On ne modifie jamais une révision : elle sert à comparer et, si besoin, à restaurer.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ventes_revision (
+        id SERIAL PRIMARY KEY,
+        year INTEGER NOT NULL,
+        nom TEXT NOT NULL,
+        commentaire TEXT,
+        lignes JSONB NOT NULL,
+        total_ca DOUBLE PRECISION,
+        cree_par TEXT,
+        cree_le TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ventes_revision_year ON ventes_revision (year)`);
+    // État de stock Bio-Steril : un instantané par mois, importé depuis le fichier Excel « SUIVI_STOCK ».
+    // Une ligne = un article, dans un emplacement, pour un lot donné (2 emplacements = 2 lignes, qui s'additionnent).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_biosterile (
+        id SERIAL PRIMARY KEY,
+        periode TEXT NOT NULL,
+        emplacement TEXT DEFAULT '',
+        article_id TEXT DEFAULT '',
+        type_article TEXT DEFAULT '',
+        designation TEXT DEFAULT '',
+        fournisseur TEXT DEFAULT '',
+        ref_fournisseur TEXT DEFAULT '',
+        lot TEXT DEFAULT '',
+        quantite NUMERIC DEFAULT 0,
+        unite TEXT DEFAULT '',
+        date_pr DATE,
+        statut TEXT DEFAULT '',
+        date_reception DATE
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_stock_bio_periode ON stock_biosterile(periode)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_stock_bio_article ON stock_biosterile(article_id)`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_biosterile_import (
+        periode TEXT PRIMARY KEY,
+        fichier TEXT DEFAULT '',
+        lignes INTEGER DEFAULT 0,
+        imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Valorisation du stock : catalogue des coûts unitaires par article (importé du fichier « ETAT STOCK », ajustable à la main).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_prix (
+        article_id TEXT PRIMARY KEY,
+        libelle TEXT DEFAULT '',
+        unite TEXT DEFAULT '',
+        cout NUMERIC DEFAULT 0,
+        source TEXT DEFAULT 'import',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Stocks saisis à la main (Louna, Laboratoire France Cosmétique, R&D…) qui complètent le fichier Bio-Steril.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_manuel (
+        id SERIAL PRIMARY KEY,
+        periode TEXT NOT NULL,
+        site TEXT DEFAULT '',
+        article_id TEXT DEFAULT '',
+        designation TEXT DEFAULT '',
+        quantite NUMERIC DEFAULT 0,
+        unite TEXT DEFAULT '',
+        cout NUMERIC,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_stock_manuel_periode ON stock_manuel(periode)`);
+    // Corrections manuelles des lignes venant du fichier Bio-Steril (quantité et/ou unité).
+    // Elles survivent au rechargement du fichier : ce qui est saisi à la main est toujours prioritaire.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_correction (
+        periode TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        quantite NUMERIC,
+        unite TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (periode, article_id)
+      )
+    `);
+    // Clôture mensuelle : fige la valorisation d'un mois (le détail complet est conservé tel quel).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stock_valo_cloture (
+        periode TEXT PRIMARY KEY,
+        total NUMERIC DEFAULT 0,
+        detail JSONB DEFAULT '[]'::jsonb,
+        cloture_par TEXT DEFAULT '',
+        cloture_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     // Seed des 4 projets actuels (idempotent)
     await client.query(`
       INSERT INTO ops_projects (name, code, color) VALUES
@@ -1083,6 +1204,24 @@ async function initDatabase() {
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Historique des CoA remplacés ou retirés : on n'écrase jamais un certificat, on l'archive
+    // (exigence de traçabilité ISO 13485 : prouver quel certificat faisait foi à une date donnée).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS coa_document_version (
+        id SERIAL PRIMARY KEY,
+        lot_id INTEGER REFERENCES coa_lot_mp(id) ON DELETE CASCADE,
+        nom_fichier TEXT NOT NULL,
+        type_mime TEXT DEFAULT 'application/pdf',
+        taille_octets INTEGER,
+        contenu BYTEA,
+        uploaded_by TEXT,
+        uploaded_at TIMESTAMP,
+        archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        archived_by TEXT,
+        motif TEXT
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_coa_doc_version_lot ON coa_document_version (lot_id)`);
 
     // --- Nettoyage : abandon de l'approche « prod_lot » native au profit de la photocopie Excel live (Graph).
     // Ces tables avaient été créées lors d'un run précédent ; on les supprime (no-op si déjà absentes).
@@ -1518,6 +1657,15 @@ async function initDatabase() {
             [name, address, customerId]);
         }
       }
+      // Référentiel client UNIQUE : on y rapatrie l'ancienne liste des réglages et tous les clients
+      // déjà utilisés sur des lots, pour qu'aucun nom existant ne disparaisse de l'application.
+      await client.query(`
+        INSERT INTO pl_clients (name)
+        SELECT DISTINCT TRIM(nom) FROM (
+          SELECT jsonb_array_elements_text(value) AS nom FROM settings WHERE key = 'clients' AND jsonb_typeof(value) = 'array'
+          UNION SELECT client AS nom FROM batches WHERE COALESCE(client, '') <> ''
+        ) x WHERE TRIM(nom) <> ''
+        ON CONFLICT (name) DO NOTHING`);
     }
     {
       const n = (await client.query('SELECT COUNT(*)::int AS n FROM pl_pickup_sites')).rows[0].n;
@@ -1681,6 +1829,18 @@ function requireRole(minRole: UserRole) {
   };
 }
 
+// Onglets « Accueil » et « Emails » : réservés au propriétaire des boîtes mail (Abdel).
+// Ils contiennent ses emails professionnels ET personnels : même un administrateur
+// ne doit pas y accéder. On compare le nom d'utilisateur, indépendamment du rôle.
+const MAIL_OWNER = (process.env.MAIL_OWNER || 'admin').trim().toLowerCase();
+function isMailOwner(u?: { username?: string } | null): boolean {
+  return !!u?.username && u.username.trim().toLowerCase() === MAIL_OWNER;
+}
+function requireOwner(req: AuthRequest, res: Response, next: NextFunction) {
+  if (isMailOwner(req.user)) return next();
+  return res.status(403).json({ error: 'Section personnelle : accès réservé.' });
+}
+
 // Autorise si l'utilisateur est admin OU si l'onglet figure dans ses permissions.
 function requireView(viewId: string) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -1691,6 +1851,14 @@ function requireView(viewId: string) {
     return res.status(403).json({ error: 'Accès non autorisé à cette section.' });
   };
 }
+
+// ---- Le n° de lot est le fil conducteur de toute l'application ----
+// « EA130A », « ea130 a » et « EA-130A » désignent le même lot : on compare toujours sur cette forme
+// normalisée (majuscules, sans espaces ni tirets) pour ne plus créer de liens fantômes.
+// La valeur STOCKÉE reste le numéro officiel du lot (batches.id), jamais la forme normalisée.
+const normLot = (v: any) => String(v ?? '').toUpperCase().replace(/[\s\-_.]/g, '').trim();
+// Même normalisation, côté SQL, pour comparer une colonne à normLot(...).
+const LOT_KEY_SQL = (col: string) => `UPPER(REGEXP_REPLACE(${col}, '[[:space:]\\-_.]', '', 'g'))`;
 
 function broadcast(event: string, data?: any) {
   io.emit(event, data);
@@ -1747,7 +1915,8 @@ app.post('/api/login', async (req: Request, res: Response) => {
         id: user.id,
         username: user.username,
         role: user.role,
-        permissions
+        permissions,
+        isOwner: isMailOwner(user)   // onglets Accueil / Emails (personnels)
       },
       expiresIn: JWT_EXPIRES_IN
     });
@@ -1758,7 +1927,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
 });
 
 app.get('/api/me', authenticateToken, (req: AuthRequest, res: Response) => {
-  res.json({ user: req.user });
+  res.json({ user: { ...req.user, isOwner: isMailOwner(req.user) } });
 });
 
 app.get('/api/users', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
@@ -1912,6 +2081,19 @@ function mapBatchFromDb(row: any): any {
     status: row.status,
     process_stage: row.process_stage,
     quality_status: row.quality_status,
+    responsable: row.responsable || '',
+    blocage_motif: row.blocage_motif || '',
+    pickup_date: row.pickup_date ? String(row.pickup_date).slice(0, 10) : null,
+    sold_manuel: !!row.sold_manuel,
+    cloture: !!row.cloture,
+    cloture_at: row.cloture_at,
+    cloture_par: row.cloture_par || '',
+    stage_since: row.stage_since,
+    prrcNotifiedAt: row.prrc_notified_at,
+    prrcNotifiedBy: row.prrc_notified_by,
+    releaseDocUrl: row.release_doc_url,
+    releaseDocName: row.release_doc_name,
+    releaseDate: row.release_detected_at ? String(row.release_detected_at).slice(0, 10) : null,
     schedule_health: computeScheduleHealth(row.enddate, row.deliverydate, row.process_stage),
     progress: row.progress,
     startDate: row.startdate,
@@ -2192,6 +2374,95 @@ app.post('/api/batches', authenticateToken, requireRole('editor'), async (req: A
   }
 });
 
+// Trace du clic sur « Notifier Farid » (l'email s'ouvre ensuite dans Outlook côté navigateur).
+app.post('/api/batches/:id/notify-prrc', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(
+      `UPDATE batches SET prrc_notified_at=CURRENT_TIMESTAMP, prrc_notified_by=$2 WHERE id=$1 RETURNING prrc_notified_at, prrc_notified_by`,
+      [req.params.id, req.user?.username || null]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'Lot introuvable' });
+    await logActivity(req, 'BATCH_NOTIFY_PRRC', req.params.id, `Notification de libération préparée pour le lot ${req.params.id}`);
+    broadcast('batch:changed', {});
+    res.json({ ok: true, notifiedAt: r.rows[0].prrc_notified_at, notifiedBy: r.rows[0].prrc_notified_by });
+  } catch (e) { console.error('notify-prrc', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// ---- Détection automatique des libérations sur SharePoint --------------------------------------
+// Arborescence : 01-BATCH FILES / <année> / [<catégorie>] / « Lot <n° de lot> - <produit> » / 07-LIBERATION / *.pdf
+// La présence d'un PDF dans 07-LIBERATION signifie que le PRRC a libéré le lot.
+const BATCH_FILES_PATH = process.env.GRAPH_BATCH_FILES_PATH
+  || 'General/02_ASSURANCE QUALITÉ/05 - Manufacturing/05 - Records/04- Production lots/01-BATCH FILES';
+
+// Parcourt l'arborescence et renvoie, pour chaque dossier de lot, le 1er PDF trouvé dans son sous-dossier 07-LIBERATION.
+async function scanReleaseFolders(): Promise<{ folder: string; pdf: string; url: string; modified: string }[]> {
+  const driveId = process.env.GRAPH_DRIVE_ID as string;
+  const enc = BATCH_FILES_PATH.split('/').map(encodeURIComponent).join('/');
+  const root = await graphGet(`${GRAPH}/drives/${driveId}/root:/${enc}`);
+  const out: { folder: string; pdf: string; url: string; modified: string }[] = [];
+  const children = async (id: string) => {
+    const acc: any[] = [];
+    let url: string | null = `${GRAPH}/drives/${driveId}/items/${id}/children?$select=id,name,file,folder,webUrl,lastModifiedDateTime&$top=200`;
+    while (url) { const j: any = await graphGet(url); acc.push(...(j.value || [])); url = j['@odata.nextLink'] || null; }
+    return acc;
+  };
+  // Descente : on s'arrête dès qu'un dossier contient un 07-LIBERATION (c'est un dossier de lot).
+  const visit = async (id: string, name: string, depth: number): Promise<void> => {
+    const items = await children(id);
+    const rel = items.find((c: any) => c.folder && /lib[eé]ration/i.test(String(c.name || '')));
+    if (rel) {
+      const files = await children(rel.id);
+      const pdf = files.find((f: any) => f.file && /\.pdf$/i.test(String(f.name || '')));
+      if (pdf) out.push({ folder: name, pdf: pdf.name, url: pdf.webUrl, modified: String(pdf.lastModifiedDateTime || '').slice(0, 10) });
+      return;
+    }
+    if (depth >= 4) return;
+    // Descente par paquets de 6 en parallèle : l'arborescence compte ~200 dossiers, en série le scan
+    // dépasserait la minute et la requête HTTP risquerait d'expirer.
+    const subs = items.filter((c: any) => c.folder);
+    for (let i = 0; i < subs.length; i += 6) {
+      await Promise.all(subs.slice(i, i + 6).map((c: any) => visit(c.id, String(c.name || ''), depth + 1)));
+    }
+  };
+  await visit(root.id, '', 0);
+  return out;
+}
+
+app.post('/api/batches/scan-liberation', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  if (!graphConfigured()) return res.status(503).json({ error: 'Connexion SharePoint non configurée sur ce serveur (fonctionne en production).' });
+  try {
+    const found = await scanReleaseFolders();
+    const b = await pool.query(`SELECT id, process_stage, quality_status FROM batches`);
+    // Un n° de lot long (EA120D-1) doit gagner sur un plus court (EA120D) contenu dedans : on teste du plus long au plus court.
+    const ids = b.rows.map((x: any) => String(x.id)).sort((a, b2) => b2.length - a.length);
+    const byId: Record<string, { pdf: string; url: string; modified: string }> = {};
+    for (const f of found) {
+      const hay = f.folder.toUpperCase();
+      const hit = ids.find((id) => hay.includes(id.toUpperCase()));
+      if (hit && !byId[hit]) byId[hit] = { pdf: f.pdf, url: f.url, modified: f.modified };
+    }
+    // Garde-fou : on ne libère QUE les lots à l'étape Libération dont la qualité est « En cours ».
+    // Un lot en Quarantaine ou Rejeté n'est jamais écrasé par un document trouvé.
+    const released: string[] = [];
+    for (const row of b.rows) {
+      const doc = byId[String(row.id)];
+      if (!doc) continue;
+      const eligible = row.process_stage === 'LIBERATION' && row.quality_status === 'EN_COURS';
+      await pool.query(
+        `UPDATE batches SET release_doc_url=$2, release_doc_name=$3, release_detected_at=CURRENT_TIMESTAMP${eligible ? ", quality_status='LIBERE'" : ''} WHERE id=$1`,
+        [row.id, doc.url, doc.pdf]
+      );
+      if (eligible) released.push(String(row.id));
+    }
+    if (released.length) await logActivity(req, 'BATCH_AUTO_RELEASE', null, `Libération détectée sur SharePoint : ${released.join(', ')}`);
+    broadcast('batch:changed', {});
+    res.json({ scanned: found.length, matched: Object.keys(byId).length, released });
+  } catch (e: any) {
+    console.error('scan-liberation', e);
+    res.status(502).json({ error: 'Analyse impossible : ' + String(e?.message || e).slice(0, 160) });
+  }
+});
+
 app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -2202,7 +2473,7 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
 
     const allowedFields = [
       'id', 'fluxKey', 'reference', 'client', 'product', 'stepIndex', 'status',
-      'process_stage', 'quality_status',
+      'process_stage', 'quality_status', 'responsable', 'blocage_motif', 'pickup_date', 'sold_manuel',
       'progress', 'startDate', 'endDate', 'deliveryDate', 'notes', 'volume',
       'boxesTarget', 'distributed', 'conform', 'sold', 'palettes', 'samples', 'milestones', 'prepTasks'
     ];
@@ -2276,6 +2547,12 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
         return res.status(400).json({ error: 'Aucun champ à mettre à jour' });
       }
 
+      // Changement d'étape : on horodate l'entrée dans la nouvelle étape, pour pouvoir mesurer
+      // depuis combien de temps un lot y stagne (colonne « Depuis » du suivi de production).
+      const etapeAvant = currentRes.rows[0].process_stage || null;
+      const changeEtape = updates.process_stage !== undefined && updates.process_stage !== etapeAvant;
+      if (changeEtape) fields.push(`stage_since = CURRENT_TIMESTAMP`);
+
       fields.push(`updated_at = CURRENT_TIMESTAMP`);
       values.push(id);
 
@@ -2298,6 +2575,8 @@ app.patch('/api/batches/:id', authenticateToken, requireRole('editor'), async (r
 
       const changedFields = Object.keys(updates).filter(k => allowedFields.includes(k)).join(', ');
       await logActivity(req, 'BATCH_UPDATE', updatedBatch.id, `A mis à jour le lot ${id} (Champs modifiés: ${changedFields})`);
+      // Le passage d'une étape à l'autre est le fait marquant de la vie d'un lot : il a sa propre trace.
+      if (changeEtape) await logActivity(req, 'BATCH_STAGE_CHANGE', updatedBatch.id, `Lot ${id} : étape ${etapeAvant || '—'} → ${updates.process_stage}`);
 
       broadcast('batch:updated', updatedBatch);
       res.json(updatedBatch);
@@ -2354,6 +2633,38 @@ app.post('/api/batches/:id/notes', authenticateToken, requireRole('editor'), asy
   }
 });
 
+// ---- Clôture d'un lot : il sort des listes actives, sa fiche passe en lecture seule ----
+// Rien n'est supprimé : le lot reste consultable, et « Rouvrir » annule la clôture.
+app.post('/api/batches/:id/cloturer', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r0 = await pool.query('SELECT pickup_date, cloture FROM batches WHERE id = $1', [req.params.id]);
+    const lot = r0.rows[0];
+    if (!lot) return res.status(404).json({ error: 'Lot introuvable' });
+    if (lot.cloture) return res.status(409).json({ error: 'Ce lot est déjà clôturé.' });
+    // La date d'enlèvement réelle est la preuve que la marchandise est partie : sans elle, pas de clôture.
+    if (!lot.pickup_date) return res.status(400).json({ error: "Renseignez d'abord la date d'enlèvement réelle : c'est elle qui déclenche la clôture." });
+    const r = await pool.query(
+      `UPDATE batches SET cloture = TRUE, cloture_at = CURRENT_TIMESTAMP, cloture_par = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING *`, [req.params.id, req.user?.username || null]);
+    const b = mapBatchFromDb(r.rows[0]);
+    await logActivity(req, 'BATCH_CLOTURE', req.params.id, `A clôturé le lot ${req.params.id} (enlèvement du ${String(lot.pickup_date).slice(0, 10)})`);
+    broadcast('batch:updated', b);
+    res.json(b);
+  } catch (e) { console.error('cloture lot', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.post('/api/batches/:id/rouvrir', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(
+      `UPDATE batches SET cloture = FALSE, cloture_at = NULL, cloture_par = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING *`, [req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Lot introuvable' });
+    const b = mapBatchFromDb(r.rows[0]);
+    await logActivity(req, 'BATCH_REOUVERTURE', req.params.id, `A rouvert le lot ${req.params.id}`);
+    broadcast('batch:updated', b);
+    res.json(b);
+  } catch (e) { console.error('rouvrir lot', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
 app.delete('/api/batches/:id', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -2377,6 +2688,610 @@ app.delete('/api/batches/:id', authenticateToken, requireRole('admin'), async (r
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting batch:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --- État de stock Bio-Steril (import mensuel du fichier Excel SUIVI_STOCK) ---
+
+// Normalise un en-tête de colonne : majuscules, sans accent, espaces compactés (le fichier a des espaces en trop).
+const stockNorm = (s: any) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+// Formate une date avec ses composants LOCAUX (toISOString reculerait d'un jour selon le fuseau).
+const stockYmd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+// Construit une date SQL en refusant les dates impossibles saisies dans le fichier (ex. « 31/06 »).
+const stockMkYmd = (y: number, m: number, d: number): string | null => {
+  if (!(y >= 1900 && y <= 2200 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+  const t = new Date(Date.UTC(y, m - 1, d));
+  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+};
+// Convertit une cellule en date SQL (AAAA-MM-JJ) ; 'N/A', vide ou illisible => null.
+const stockDate = (v: any): string | null => {
+  if (v === null || v === undefined || v === '') return null;
+  // Numéro de série Excel (jours depuis le 30/12/1899) : conversion exacte, insensible au fuseau.
+  if (typeof v === 'number' && isFinite(v) && v > 1000) return stockYmd(new Date(Math.round((v - 25569) * 86400000)));
+  // Objet Date : la lib peut renvoyer 23:59:39 la veille — on arrondit au jour le plus proche.
+  if (v instanceof Date && !isNaN(v.getTime())) return stockYmd(new Date(Math.round(v.getTime() / 86400000) * 86400000));
+  const s = String(v).trim();
+  if (!s || /^(N\/?A|-)$/i.test(s)) return null;
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return stockMkYmd(+iso[1], +iso[2], +iso[3]);
+  const fr = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/);
+  if (fr) return stockMkYmd(+fr[3], +fr[2], +fr[1]);
+  return null;
+};
+
+// Import d'un fichier Excel mensuel : remplace intégralement l'instantané de la période concernée.
+app.post('/api/stock-biosterile/import', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const filename = String(req.body?.filename || 'import.xlsx');
+    const buf = Buffer.from(String(req.body?.data || '').split(',').pop() || '', 'base64');
+    if (!buf.length) return res.status(400).json({ error: 'Fichier vide ou illisible.' });
+
+    const mod: any = await import('xlsx'); const XLSX = mod.default ?? mod;
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const shName = wb.SheetNames.find((n: string) => stockNorm(n).includes('SUIVI_STOCK') || stockNorm(n).includes('SUIVI STOCK') || stockNorm(n).includes('STOCK')) || wb.SheetNames[0];
+    if (!shName) return res.status(400).json({ error: 'Fichier Excel sans feuille exploitable.' });
+    const grid: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[shName], { header: 1, raw: true });
+    if (!grid.length) return res.status(400).json({ error: `La feuille « ${shName} » est vide.` });
+
+    // Repère la ligne d'en-têtes (celle qui contient ID ARTICLE) puis l'index de chaque colonne utile.
+    const hIdx = grid.findIndex(r => (r || []).some(c => stockNorm(c).includes('ID ARTICLE')));
+    if (hIdx < 0) return res.status(400).json({ error: "Colonne « ID ARTICLE » introuvable : ce fichier n'a pas le format attendu." });
+    const heads = (grid[hIdx] || []).map(stockNorm);
+    const col = (...keys: string[]) => heads.findIndex(h => keys.some(k => h.includes(k)));
+    const iEmp = col('EMPLACEMENT'), iArt = col('ID ARTICLE'), iType = col('TYPE ARTICLE'), iDes = col('DESIGNATION');
+    const iRefF = col('REF FOURNISSEUR'), iLot = col('LOT'), iQte = col('QUANTITE'), iUni = col('UNITE');
+    const iPr = col('DATE PR'), iSta = col('STATUT'), iRec = col('RECEPTION');
+    // Fournisseur : éviter de tomber sur « REF FOURNISSEUR ».
+    const iFou = heads.findIndex((h, k) => h.includes('FOURNISSEUR') && k !== iRefF);
+    const cell = (r: any[], i: number) => (i < 0 ? '' : String(r[i] ?? '').trim());
+
+    const rows: any[][] = [];
+    let datesIgnorees = 0;
+    for (const r of grid.slice(hIdx + 1)) {
+      if (!r) continue;
+      const art = cell(r, iArt);
+      if (!art) continue; // ligne vide / pied de page
+      const qCell = iQte < 0 ? null : r[iQte];
+      let qte = 0;
+      if (typeof qCell === 'number') qte = qCell;
+      else { const n = Number(String(qCell ?? '').replace(/[\s\u00a0]/g, '').replace(',', '.')); qte = isFinite(n) ? n : 0; }
+      const dPr = stockDate(r[iPr]), dRec = stockDate(r[iRec]);
+      for (const raw of [r[iPr], r[iRec]]) {
+        const t = String(raw ?? '').trim();
+        if (t && !/^(N\/?A|-)$/i.test(t) && stockDate(raw) === null) datesIgnorees++;
+      }
+      rows.push([cell(r, iEmp), art, cell(r, iType), cell(r, iDes), cell(r, iFou), cell(r, iRefF),
+        cell(r, iLot), qte, cell(r, iUni), dPr, cell(r, iSta), dRec]);
+    }
+    if (!rows.length) return res.status(400).json({ error: 'Aucune ligne de stock trouvée dans ce fichier.' });
+
+    // Période (AAAA-MM) : date d'édition de la feuille NOTE en priorité, sinon le nom du fichier.
+    let periode = '';
+    const noteSheet = wb.SheetNames.find((n: string) => stockNorm(n).includes('NOTE'));
+    if (noteSheet) {
+      const ng: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[noteSheet], { header: 1, raw: true });
+      for (const r of ng) {
+        const k = (r || []).findIndex(c => stockNorm(c).includes('EDITION'));
+        if (k >= 0) { const d = (r.slice(k + 1).map(stockDate).find(Boolean)) || stockDate(r[k]); if (d) { periode = d.slice(0, 7); break; } }
+      }
+    }
+    if (!periode) { const m = filename.match(/(20\d{2})[-_ ]?(0[1-9]|1[0-2])/); if (m) periode = `${m[1]}-${m[2]}`; }
+    if (!periode) return res.status(400).json({ error: "Mois de l'instantané introuvable : nommez le fichier SUIVI_STOCK_AAAA-MM.xlsx." });
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM stock_biosterile WHERE periode = $1', [periode]);
+    const CH = 200;
+    for (let s = 0; s < rows.length; s += CH) {
+      const chunk = rows.slice(s, s + CH);
+      const vals: any[] = []; const ph: string[] = [];
+      chunk.forEach((r, k) => {
+        const b = k * 13;
+        ph.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13})`);
+        vals.push(periode, ...r);
+      });
+      await client.query(`INSERT INTO stock_biosterile
+        (periode, emplacement, article_id, type_article, designation, fournisseur, ref_fournisseur, lot, quantite, unite, date_pr, statut, date_reception)
+        VALUES ${ph.join(',')}`, vals);
+    }
+    await client.query(
+      `INSERT INTO stock_biosterile_import (periode, fichier, lignes, imported_at) VALUES ($1,$2,$3,CURRENT_TIMESTAMP)
+       ON CONFLICT (periode) DO UPDATE SET fichier = EXCLUDED.fichier, lignes = EXCLUDED.lignes, imported_at = CURRENT_TIMESTAMP`,
+      [periode, filename, rows.length]);
+    await client.query('COMMIT');
+
+    await logActivity(req, 'STOCK_BIO_IMPORT', periode, `A importé l'état de stock Bio-Steril ${periode} (${rows.length} lignes)`);
+    broadcast('stock-biosterile:changed', { periode });
+    res.json({ periode, lignes: rows.length, feuille: shName, datesIgnorees });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error importing stock biosterile:', error);
+    res.status(500).json({ error: "Import impossible : fichier illisible ou format inattendu." });
+  } finally { client.release(); }
+});
+
+// Lecture d'un instantané : la période demandée (ou la plus récente) + la liste des mois disponibles.
+app.get('/api/stock-biosterile', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const pRes = await pool.query(
+      `SELECT i.periode, i.fichier, i.lignes, i.imported_at FROM stock_biosterile_import i ORDER BY i.periode DESC`);
+    const periodes = pRes.rows.map(r => ({ periode: r.periode, fichier: r.fichier, lignes: r.lignes, importedAt: r.imported_at }));
+    const asked = String(req.query.periode || '');
+    const periode = periodes.some(p => p.periode === asked) ? asked : (periodes[0]?.periode || '');
+    if (!periode) return res.json({ periodes: [], periode: '', rows: [] });
+    const r = await pool.query(
+      `SELECT emplacement, article_id, type_article, designation, fournisseur, ref_fournisseur, lot,
+              quantite, unite, statut,
+              TO_CHAR(date_pr, 'YYYY-MM-DD') AS date_pr,
+              TO_CHAR(date_reception, 'YYYY-MM-DD') AS date_reception
+       FROM stock_biosterile WHERE periode = $1 ORDER BY article_id, lot, emplacement`, [periode]);
+    res.json({
+      periodes, periode,
+      rows: r.rows.map(x => ({
+        emplacement: x.emplacement, articleId: x.article_id, typeArticle: x.type_article, designation: x.designation,
+        fournisseur: x.fournisseur, refFournisseur: x.ref_fournisseur, lot: x.lot,
+        quantite: Number(x.quantite) || 0, unite: x.unite, statut: x.statut,
+        datePr: x.date_pr || null,
+        dateReception: x.date_reception || null,
+      })),
+    });
+  } catch (error) {
+    console.error('Error fetching stock biosterile:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Historique d'un article : quantité totale par mois (courbe d'évolution).
+app.get('/api/stock-biosterile/historique', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const article = String(req.query.article || '').trim();
+    if (!article) return res.status(400).json({ error: 'Article manquant' });
+    const r = await pool.query(
+      `SELECT periode, SUM(quantite) AS total FROM stock_biosterile WHERE article_id = $1 GROUP BY periode ORDER BY periode`, [article]);
+    res.json({ article, points: r.rows.map(x => ({ periode: x.periode, total: Number(x.total) || 0 })) });
+  } catch (error) {
+    console.error('Error fetching stock biosterile history:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --- Valorisation du stock (catalogue de prix + stocks manuels + clôture mensuelle) ---
+
+// Clé article : majuscules, espaces normalisés. Le code de base sert de repli pour les variantes « AC-039 V01 ».
+const valoKey = (s: any) => stockNorm(s);
+const valoBase = (s: any) => valoKey(s).split(' ')[0];
+const valoFamille = (art: string) => {
+  const a = valoBase(art);
+  if (a.startsWith('AC-')) return 'Articles de conditionnement';
+  if (a.startsWith('AT-')) return 'Consommables';
+  if (a.startsWith('MP-')) return 'Matières premières';
+  if (a.startsWith('COS-') || a.startsWith('DB-') || a.startsWith('DF-') || a.startsWith('PSO-')) return 'Produits finis / semi-ouvrés';
+  return 'Autres';
+};
+const valoNum = (v: any) => {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  const n = Number(String(v ?? '').replace(/[\s €]/g, '').replace(',', '.'));
+  return isFinite(n) ? n : 0;
+};
+
+// Construit le détail valorisé d'un mois : stock Bio-Steril + stocks saisis à la main, au prix du catalogue.
+async function valoDetail(periode: string) {
+  const prixRes = await pool.query('SELECT article_id, libelle, unite, cout FROM stock_prix');
+  const prix = new Map<string, { cout: number; libelle: string; unite: string }>();
+  for (const p of prixRes.rows) prix.set(valoKey(p.article_id), { cout: Number(p.cout) || 0, libelle: p.libelle || '', unite: p.unite || '' });
+  // Repli : le code de base ne sert que s'il ne pointe pas vers plusieurs prix différents.
+  const bases = new Map<string, { cout: number; libelle: string; unite: string } | null>();
+  for (const [k, v] of prix) {
+    const b = k.split(' ')[0];
+    if (b === k) continue;
+    if (!bases.has(b)) bases.set(b, v);
+    else { const p = bases.get(b); if (p && p.cout !== v.cout) bases.set(b, null); }
+  }
+  const lookup = (art: string) => prix.get(valoKey(art)) ?? prix.get(valoBase(art)) ?? bases.get(valoBase(art)) ?? null;
+
+  const bio = await pool.query(
+    `SELECT article_id, MIN(designation) AS designation, MIN(unite) AS unite, SUM(quantite) AS quantite
+     FROM stock_biosterile WHERE periode = $1 GROUP BY article_id ORDER BY article_id`, [periode]);
+  const man = await pool.query(
+    `SELECT id, site, article_id, designation, unite, quantite, cout
+     FROM stock_manuel WHERE periode = $1 ORDER BY site, article_id, designation`, [periode]);
+
+  // Corrections manuelles du mois : elles priment sur le fichier Bio-Steril.
+  const corr = await pool.query('SELECT article_id, quantite, unite FROM stock_correction WHERE periode = $1', [periode]);
+  const corrections = new Map(corr.rows.map(c => [valoKey(c.article_id), c]));
+
+  const rows: any[] = [];
+  for (const r of bio.rows) {
+    const p = lookup(r.article_id);
+    const c = corrections.get(valoKey(r.article_id));
+    const qFichier = Number(r.quantite) || 0;
+    const uFichier = r.unite || p?.unite || '';
+    const q = c && c.quantite !== null && c.quantite !== undefined ? Number(c.quantite) : qFichier;
+    const u = c && c.unite ? c.unite : uFichier;
+    rows.push({
+      source: 'biosteril', site: 'Bio-Steril', articleId: r.article_id,
+      designation: r.designation || p?.libelle || '', unite: u,
+      famille: valoFamille(r.article_id), quantite: q,
+      cout: p ? p.cout : null, valeur: p ? q * p.cout : 0, sansPrix: !p,
+      corrige: !!c, quantiteFichier: qFichier, uniteFichier: uFichier,
+    });
+  }
+  for (const r of man.rows) {
+    const p = lookup(r.article_id);
+    const cout = r.cout === null || r.cout === undefined ? (p ? p.cout : null) : Number(r.cout);
+    const q = Number(r.quantite) || 0;
+    rows.push({
+      source: 'manuel', id: r.id, site: r.site || 'Autre site', articleId: r.article_id || '',
+      designation: r.designation || p?.libelle || '', unite: r.unite || p?.unite || '',
+      famille: r.article_id ? valoFamille(r.article_id) : 'Autres', quantite: q,
+      cout: cout === null ? null : cout, valeur: cout === null ? 0 : q * cout, sansPrix: cout === null,
+    });
+  }
+  return rows;
+}
+
+// Liste des mois valorisables : import Bio-Steril, saisies manuelles et clôtures confondus.
+async function valoPeriodes() {
+  const r = await pool.query(
+    `SELECT periode FROM stock_biosterile_import
+     UNION SELECT periode FROM stock_manuel
+     UNION SELECT periode FROM stock_valo_cloture
+     ORDER BY periode DESC`);
+  return r.rows.map(x => x.periode);
+}
+
+// Import du catalogue de prix (fichier « ETAT STOCK ») : seuls la référence, le nom, l'unité et le coût sont lus.
+app.post('/api/stock-prix/import', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const filename = String(req.body?.filename || 'import.xlsx');
+    const buf = Buffer.from(String(req.body?.data || '').split(',').pop() || '', 'base64');
+    if (!buf.length) return res.status(400).json({ error: 'Fichier vide ou illisible.' });
+
+    const mod: any = await import('xlsx'); const XLSX = mod.default ?? mod;
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    let found: { ref: number; nom: number; uni: number; cout: number; grid: any[][]; hIdx: number; sheet: string } | null = null;
+    for (const sh of wb.SheetNames) {
+      const grid: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[sh], { header: 1, raw: true });
+      const hIdx = grid.findIndex(r => (r || []).some(c => stockNorm(c).includes('REFERENCE INTERNE')));
+      if (hIdx < 0) continue;
+      const heads = (grid[hIdx] || []).map(stockNorm);
+      const col = (...keys: string[]) => heads.findIndex(h => keys.some(k => h.includes(k)));
+      const cout = heads.findIndex(h => h === 'COUT' || h.startsWith('COUT '));
+      if (cout < 0) continue;
+      found = { ref: col('REFERENCE INTERNE'), nom: col('NOM', 'DESIGNATION'), uni: col('UNITE'), cout, grid, hIdx, sheet: sh };
+      break;
+    }
+    if (!found) return res.status(400).json({ error: "Colonnes « Référence interne » et « Coût » introuvables : ce fichier n'a pas le format attendu." });
+
+    const items = new Map<string, { libelle: string; unite: string; cout: number }>();
+    for (const r of found.grid.slice(found.hIdx + 1)) {
+      if (!r) continue;
+      const ref = String(r[found.ref] ?? '').trim();
+      if (!ref || /total/i.test(ref)) continue;
+      const raw = r[found.cout];
+      if (raw === null || raw === undefined || String(raw).trim() === '') continue;
+      items.set(valoKey(ref), {
+        libelle: found.nom < 0 ? '' : String(r[found.nom] ?? '').trim(),
+        unite: found.uni < 0 ? '' : String(r[found.uni] ?? '').trim(),
+        cout: valoNum(raw),
+      });
+    }
+    if (!items.size) return res.status(400).json({ error: 'Aucun prix trouvé dans ce fichier.' });
+
+    // Un prix ajusté à la main n'est jamais écrasé par un ré-import : seul son libellé est rafraîchi.
+    let proteges = 0;
+    for (const [ref, v] of items) {
+      const r = await pool.query(
+        `INSERT INTO stock_prix (article_id, libelle, unite, cout, source, updated_at)
+         VALUES ($1,$2,$3,$4,'import',CURRENT_TIMESTAMP)
+         ON CONFLICT (article_id) DO UPDATE SET
+           libelle = COALESCE(NULLIF(EXCLUDED.libelle,''), stock_prix.libelle),
+           unite = COALESCE(NULLIF(EXCLUDED.unite,''), stock_prix.unite),
+           cout = CASE WHEN stock_prix.source = 'manuel' THEN stock_prix.cout ELSE EXCLUDED.cout END,
+           source = stock_prix.source,
+           updated_at = CURRENT_TIMESTAMP
+         RETURNING source`,
+        [ref, v.libelle, v.unite, v.cout]);
+      if (r.rows[0]?.source === 'manuel') proteges++;
+    }
+    await logActivity(req, 'STOCK_PRIX_IMPORT', filename, `A importé le catalogue de prix (${items.size} articles)`);
+    broadcast('stock-valorisation:changed', {});
+    res.json({ prix: items.size, feuille: found.sheet, proteges });
+  } catch (error) {
+    console.error('Error importing stock prices:', error);
+    res.status(500).json({ error: 'Import impossible : fichier illisible ou format inattendu.' });
+  }
+});
+
+app.get('/api/stock-prix', authenticateToken, async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT article_id, libelle, unite, cout, source FROM stock_prix ORDER BY article_id');
+    res.json(r.rows.map(x => ({ articleId: x.article_id, libelle: x.libelle, unite: x.unite, cout: Number(x.cout) || 0, source: x.source })));
+  } catch (error) {
+    console.error('Error fetching stock prices:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Ajustement d'un prix à la main (ou création d'un prix manquant).
+app.put('/api/stock-prix', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const articleId = valoKey(req.body?.articleId);
+    if (!articleId) return res.status(400).json({ error: 'Article manquant' });
+    const cout = valoNum(req.body?.cout);
+    await pool.query(
+      `INSERT INTO stock_prix (article_id, libelle, unite, cout, source, updated_at)
+       VALUES ($1,$2,$3,$4,'manuel',CURRENT_TIMESTAMP)
+       ON CONFLICT (article_id) DO UPDATE SET cout = EXCLUDED.cout, source = 'manuel', updated_at = CURRENT_TIMESTAMP,
+         libelle = COALESCE(NULLIF(EXCLUDED.libelle,''), stock_prix.libelle),
+         unite = COALESCE(NULLIF(EXCLUDED.unite,''), stock_prix.unite)`,
+      [articleId, String(req.body?.libelle || '').trim(), String(req.body?.unite || '').trim(), cout]);
+    await logActivity(req, 'STOCK_PRIX_MAJ', articleId, `A ajusté le prix de ${articleId} à ${cout} €`);
+    broadcast('stock-valorisation:changed', {});
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error updating stock price:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Lignes de stock saisies à la main pour un mois.
+app.get('/api/stock-manuel', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const periode = String(req.query.periode || '').trim();
+    const r = await pool.query(
+      `SELECT id, site, article_id, designation, quantite, unite, cout FROM stock_manuel
+       WHERE periode = $1 ORDER BY site, article_id, designation`, [periode]);
+    res.json(r.rows.map(x => ({
+      id: x.id, site: x.site, articleId: x.article_id, designation: x.designation,
+      quantite: Number(x.quantite) || 0, unite: x.unite, cout: x.cout === null ? null : Number(x.cout),
+    })));
+  } catch (error) {
+    console.error('Error fetching manual stock:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/stock-manuel', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const periode = String(req.body?.periode || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(periode)) return res.status(400).json({ error: 'Mois invalide (attendu AAAA-MM).' });
+    const id = Number(req.body?.id) || 0;
+    const site = String(req.body?.site || '').trim();
+    const articleId = req.body?.articleId ? valoKey(req.body.articleId) : '';
+    const designation = String(req.body?.designation || '').trim();
+    if (!site || (!articleId && !designation)) return res.status(400).json({ error: 'Site et article (ou désignation) obligatoires.' });
+    const quantite = valoNum(req.body?.quantite);
+    const unite = String(req.body?.unite || '').trim();
+    const cout = req.body?.cout === null || req.body?.cout === undefined || String(req.body.cout).trim() === '' ? null : valoNum(req.body.cout);
+    if (id) {
+      await pool.query(
+        `UPDATE stock_manuel SET site=$2, article_id=$3, designation=$4, quantite=$5, unite=$6, cout=$7, updated_at=CURRENT_TIMESTAMP
+         WHERE id=$1`, [id, site, articleId, designation, quantite, unite, cout]);
+    } else {
+      await pool.query(
+        `INSERT INTO stock_manuel (periode, site, article_id, designation, quantite, unite, cout)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`, [periode, site, articleId, designation, quantite, unite, cout]);
+    }
+    broadcast('stock-valorisation:changed', { periode });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error saving manual stock:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/stock-manuel/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    await pool.query('DELETE FROM stock_manuel WHERE id = $1', [Number(req.params.id)]);
+    broadcast('stock-valorisation:changed', {});
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting manual stock:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Import Excel des stocks saisis à la main : un fichier peut couvrir un ou plusieurs sites.
+// Les lignes déjà présentes pour les sites du fichier sont remplacées (rechargement sans doublon).
+app.post('/api/stock-manuel/import', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const periode = String(req.body?.periode || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(periode)) return res.status(400).json({ error: 'Mois invalide.' });
+    const siteDefaut = String(req.body?.site || '').trim();
+    const buf = Buffer.from(String(req.body?.data || '').split(',').pop() || '', 'base64');
+    if (!buf.length) return res.status(400).json({ error: 'Fichier vide ou illisible.' });
+    const c = await pool.query('SELECT 1 FROM stock_valo_cloture WHERE periode = $1', [periode]);
+    if (c.rows.length) return res.status(400).json({ error: 'Ce mois est clôturé : rouvrez-le avant de charger un fichier.' });
+
+    const mod: any = await import('xlsx'); const XLSX = mod.default ?? mod;
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    let grid: any[][] = []; let hIdx = -1;
+    for (const sh of wb.SheetNames) {
+      const g: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[sh], { header: 1, raw: true });
+      const i = g.findIndex(r => (r || []).some(x => ['ARTICLE', 'REFERENCE', 'DESIGNATION'].some(k => stockNorm(x).includes(k))));
+      if (i >= 0) { grid = g; hIdx = i; break; }
+    }
+    if (hIdx < 0) return res.status(400).json({ error: "Colonne « Article » ou « Désignation » introuvable : utilisez le modèle Excel." });
+    const heads = (grid[hIdx] || []).map(stockNorm);
+    const col = (...keys: string[]) => heads.findIndex(h => keys.some(k => h.includes(k)));
+    const iSite = col('SITE', 'EMPLACEMENT'), iArt = col('ARTICLE', 'REFERENCE'), iDes = col('DESIGNATION', 'NOM');
+    const iQte = col('QUANTITE', 'STOCK'), iUni = col('UNITE'), iCout = heads.findIndex(h => h.includes('PRIX') || h === 'COUT' || h.startsWith('COUT '));
+
+    const lignes: any[][] = [];
+    const sites = new Set<string>();
+    for (const r of grid.slice(hIdx + 1)) {
+      if (!r) continue;
+      const site = (iSite >= 0 ? String(r[iSite] ?? '').trim() : '') || siteDefaut;
+      const art = iArt < 0 ? '' : valoKey(r[iArt]);
+      const des = iDes < 0 ? '' : String(r[iDes] ?? '').trim();
+      if (!art && !des) continue;
+      if (/total/i.test(art) || /^total/i.test(des)) continue;
+      if (!site) return res.status(400).json({ error: "Site manquant : ajoutez une colonne « Site » ou choisissez un site avant de charger." });
+      const cout = iCout < 0 || r[iCout] === null || r[iCout] === undefined || String(r[iCout]).trim() === '' ? null : valoNum(r[iCout]);
+      sites.add(site);
+      lignes.push([periode, site, art, des, iQte < 0 ? 0 : valoNum(r[iQte]), iUni < 0 ? '' : String(r[iUni] ?? '').trim(), cout]);
+    }
+    if (!lignes.length) return res.status(400).json({ error: 'Aucune ligne exploitable dans ce fichier.' });
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM stock_manuel WHERE periode = $1 AND site = ANY($2::text[])', [periode, [...sites]]);
+    for (const l of lignes) {
+      await client.query(
+        `INSERT INTO stock_manuel (periode, site, article_id, designation, quantite, unite, cout)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`, l);
+    }
+    await client.query('COMMIT');
+
+    await logActivity(req, 'STOCK_MANUEL_IMPORT', periode, `A importé ${lignes.length} ligne(s) de stock (${[...sites].join(', ')}) pour ${periode}`);
+    broadcast('stock-valorisation:changed', { periode });
+    res.json({ lignes: lignes.length, sites: [...sites] });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error importing manual stock:', error);
+    res.status(500).json({ error: 'Import impossible : fichier illisible ou format inattendu.' });
+  } finally { client.release(); }
+});
+
+// Reprend les lignes manuelles du mois précédent (quantités comprises, à ajuster ensuite).
+app.post('/api/stock-manuel/copier', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const vers = String(req.body?.vers || '').trim();
+    const depuis = String(req.body?.depuis || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(vers) || !/^\d{4}-\d{2}$/.test(depuis)) return res.status(400).json({ error: 'Mois invalide.' });
+    const ex = await pool.query('SELECT COUNT(*)::int AS n FROM stock_manuel WHERE periode = $1', [vers]);
+    if (ex.rows[0].n > 0) return res.status(400).json({ error: 'Ce mois contient déjà des lignes saisies : videz-les d’abord.' });
+    const r = await pool.query(
+      `INSERT INTO stock_manuel (periode, site, article_id, designation, quantite, unite, cout)
+       SELECT $1, site, article_id, designation, quantite, unite, cout FROM stock_manuel WHERE periode = $2`, [vers, depuis]);
+    broadcast('stock-valorisation:changed', { periode: vers });
+    res.json({ lignes: r.rowCount || 0 });
+  } catch (error) {
+    console.error('Error copying manual stock:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Correction manuelle d'une ligne venant du fichier Bio-Steril (quantité et/ou unité).
+app.put('/api/stock-correction', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const periode = String(req.body?.periode || '').trim();
+    const articleId = valoKey(req.body?.articleId);
+    if (!/^\d{4}-\d{2}$/.test(periode) || !articleId) return res.status(400).json({ error: 'Mois ou article manquant.' });
+    const c = await pool.query('SELECT 1 FROM stock_valo_cloture WHERE periode = $1', [periode]);
+    if (c.rows.length) return res.status(400).json({ error: 'Ce mois est clôturé : rouvrez-le pour corriger.' });
+    const qBrut = req.body?.quantite;
+    const quantite = qBrut === null || qBrut === undefined || String(qBrut).trim() === '' ? null : valoNum(qBrut);
+    const unite = String(req.body?.unite ?? '').trim() || null;
+    if (quantite === null && unite === null) {
+      await pool.query('DELETE FROM stock_correction WHERE periode = $1 AND article_id = $2', [periode, articleId]);
+    } else {
+      await pool.query(
+        `INSERT INTO stock_correction (periode, article_id, quantite, unite, updated_at)
+         VALUES ($1,$2,$3,$4,CURRENT_TIMESTAMP)
+         ON CONFLICT (periode, article_id) DO UPDATE SET quantite = EXCLUDED.quantite,
+           unite = EXCLUDED.unite, updated_at = CURRENT_TIMESTAMP`,
+        [periode, articleId, quantite, unite]);
+    }
+    await logActivity(req, 'STOCK_CORRECTION', articleId, `A corrigé le stock ${articleId} de ${periode}`);
+    broadcast('stock-valorisation:changed', { periode });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error saving stock correction:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Annule une correction : la ligne reprend les valeurs du fichier Bio-Steril.
+app.delete('/api/stock-correction/:periode/:article', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    await pool.query('DELETE FROM stock_correction WHERE periode = $1 AND article_id = $2',
+      [String(req.params.periode || ''), valoKey(req.params.article)]);
+    broadcast('stock-valorisation:changed', {});
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting stock correction:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Valorisation d'un mois : provisoire tant qu'il n'est pas clôturé, figée ensuite.
+app.get('/api/stock-valorisation', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const periodes = await valoPeriodes();
+    const asked = String(req.query.periode || '');
+    const periode = periodes.includes(asked) ? asked : (periodes[0] || '');
+    if (!periode) return res.json({ periodes: [], periode: '', rows: [], cloture: null });
+    const c = await pool.query('SELECT total, detail, cloture_par, cloture_at FROM stock_valo_cloture WHERE periode = $1', [periode]);
+    if (c.rows.length) {
+      const row = c.rows[0];
+      return res.json({
+        periodes, periode, rows: row.detail || [],
+        cloture: { total: Number(row.total) || 0, par: row.cloture_par, at: row.cloture_at },
+      });
+    }
+    res.json({ periodes, periode, rows: await valoDetail(periode), cloture: null });
+  } catch (error) {
+    console.error('Error fetching stock valuation:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Fige la valorisation du mois : le détail est conservé tel quel, les prix ultérieurs ne le modifient plus.
+app.post('/api/stock-valorisation/cloturer', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const periode = String(req.body?.periode || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(periode)) return res.status(400).json({ error: 'Mois invalide.' });
+    const rows = await valoDetail(periode);
+    if (!rows.length) return res.status(400).json({ error: 'Aucun stock à valoriser pour ce mois.' });
+    const total = rows.reduce((a, r) => a + (r.valeur || 0), 0);
+    await pool.query(
+      `INSERT INTO stock_valo_cloture (periode, total, detail, cloture_par, cloture_at)
+       VALUES ($1,$2,$3,$4,CURRENT_TIMESTAMP)
+       ON CONFLICT (periode) DO UPDATE SET total = EXCLUDED.total, detail = EXCLUDED.detail,
+         cloture_par = EXCLUDED.cloture_par, cloture_at = CURRENT_TIMESTAMP`,
+      [periode, total, JSON.stringify(rows), req.user?.username || '']);
+    await logActivity(req, 'STOCK_VALO_CLOTURE', periode, `A clôturé la valorisation de ${periode} (${Math.round(total)} €)`);
+    broadcast('stock-valorisation:changed', { periode });
+    res.json({ periode, total, lignes: rows.length });
+  } catch (error) {
+    console.error('Error closing stock valuation:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Rouvre un mois clôturé (la valorisation redevient provisoire).
+app.delete('/api/stock-valorisation/cloture/:periode', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const periode = String(req.params.periode || '');
+    await pool.query('DELETE FROM stock_valo_cloture WHERE periode = $1', [periode]);
+    await logActivity(req, 'STOCK_VALO_REOUVERTURE', periode, `A rouvert la valorisation de ${periode}`);
+    broadcast('stock-valorisation:changed', { periode });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error reopening stock valuation:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Historique : total valorisé par mois (mois clôturés figés, mois en cours calculés à la volée).
+app.get('/api/stock-valorisation/historique', authenticateToken, async (_req: AuthRequest, res: Response) => {
+  try {
+    const periodes = (await valoPeriodes()).slice().sort();
+    const clo = await pool.query('SELECT periode, total FROM stock_valo_cloture');
+    const fige = new Map(clo.rows.map(r => [r.periode, Number(r.total) || 0]));
+    const points: any[] = [];
+    for (const p of periodes) {
+      if (fige.has(p)) { points.push({ periode: p, total: fige.get(p), cloture: true }); continue; }
+      const rows = await valoDetail(p);
+      points.push({ periode: p, total: rows.reduce((a, r) => a + (r.valeur || 0), 0), cloture: false });
+    }
+    res.json({ points });
+  } catch (error) {
+    console.error('Error fetching valuation history:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
@@ -2703,7 +3618,7 @@ app.delete('/api/deliveries/:id', authenticateToken, requireRole('admin'), async
 });
 
 // ===================== Module Reporting Ops =====================
-function mapOpsProject(r: any) { return { id: r.id, name: r.name, code: r.code, color: r.color, archived: r.archived, createdAt: r.created_at }; }
+function mapOpsProject(r: any) { return { id: r.id, name: r.name, code: r.code, color: r.color, archived: r.archived, archiveStatut: r.archive_statut || '', archiveMotif: r.archive_motif || '', archiveAt: r.archive_at, archivePar: r.archive_par || '', createdAt: r.created_at }; }
 function mapOpsMilestone(r: any) { return { id: r.id, projectId: r.project_id, number: r.number, title: r.title, status: r.status, deadline: r.deadline, owner: r.owner, archived: r.archived }; }
 function mapOpsDeliverable(r: any) { return { id: r.id, milestoneId: r.milestone_id, title: r.title, status: r.status, deadline: r.deadline, owner: r.owner, ordre: r.ordre }; }
 function mapOpsComment(r: any) { return { id: r.id, entityType: r.entity_type, entityId: r.entity_id, isoWeek: r.iso_week, text: r.text, statut: r.statut || 'ouvert', integratedAt: r.integrated_at, integratedBy: r.integrated_by }; }
@@ -2800,6 +3715,164 @@ app.patch('/api/ops/projects/:id', authenticateToken, requireRole('editor'), asy
     res.json(mapOpsProject(row));
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
+// ================== Import d'un planning de projet (Excel ou Word) ==================
+// Deux temps : on lit le fichier et on renvoie un APERÇU (aucune écriture), puis l'utilisateur
+// valide et on crée les jalons. Un planning mal lu ne peut donc jamais polluer un projet.
+
+// Repère la colonne qui porte une information, d'après l'intitulé de l'en-tête.
+const OPS_COL_TITRE = ['JALON', 'MILESTONE', 'ETAPE', 'TACHE', 'PHASE', 'LIVRABLE', 'ACTION', 'INTITULE', 'DESIGNATION', 'LIBELLE'];
+const OPS_COL_DATE = ['DATE', 'ECHEANCE', 'DEADLINE', 'FIN', 'LIMITE', 'DELAI', 'TERME', 'DUE'];
+const OPS_COL_RESP = ['RESPONSABLE', 'OWNER', 'PILOTE', 'QUI', 'CHARGE'];
+const colMatch = (entete: any, mots: string[]) => { const h = stockNorm(entete); return !!h && mots.some(m => h.includes(m)); };
+
+// Transforme un tableau de lignes brutes en jalons { titre, echeance, responsable }.
+function opsLignesVersJalons(lignes: any[][]): { jalons: any[]; entetes: string[]; ignorees: number } {
+  const nonVide = lignes.filter(l => (l || []).some(c => String(c ?? '').trim() !== ''));
+  if (!nonVide.length) return { jalons: [], entetes: [], ignorees: 0 };
+
+  // La ligne d'en-tête est la première qui contient à la fois un intitulé et une date.
+  let iEntete = -1;
+  for (let i = 0; i < Math.min(nonVide.length, 10); i++) {
+    const l = nonVide[i];
+    if (l.some(c => colMatch(c, OPS_COL_TITRE)) && l.some(c => colMatch(c, OPS_COL_DATE))) { iEntete = i; break; }
+  }
+  const entetes = iEntete >= 0 ? nonVide[iEntete].map((c: any) => String(c ?? '').trim()) : [];
+  // Sans en-tête reconnaissable : 1re colonne = intitulé, on cherche une date dans les autres.
+  const cTitre = iEntete >= 0 ? entetes.findIndex(c => colMatch(c, OPS_COL_TITRE)) : 0;
+  const cDate = iEntete >= 0 ? entetes.findIndex(c => colMatch(c, OPS_COL_DATE)) : -1;
+  const cResp = iEntete >= 0 ? entetes.findIndex(c => colMatch(c, OPS_COL_RESP)) : -1;
+
+  const corps = iEntete >= 0 ? nonVide.slice(iEntete + 1) : nonVide;
+  const jalons: any[] = [];
+  let ignorees = 0;
+  for (const l of corps) {
+    const titre = String(l[cTitre < 0 ? 0 : cTitre] ?? '').trim();
+    if (!titre) { ignorees++; continue; }
+    // Ligne d'en-tête répétée ou ligne de total : on saute.
+    if (colMatch(titre, OPS_COL_TITRE) || /^TOTAL/i.test(titre)) { ignorees++; continue; }
+    let echeance = cDate >= 0 ? stockDate(l[cDate]) : null;
+    if (!echeance) { for (const c of l) { const d = stockDate(c); if (d) { echeance = d; break; } } }
+    jalons.push({
+      titre: titre.slice(0, 300),
+      echeance,
+      responsable: cResp >= 0 ? String(l[cResp] ?? '').trim().slice(0, 120) : '',
+    });
+  }
+  return { jalons, entetes, ignorees };
+}
+
+// Word : on récupère le texte des tableaux du document (un tableau = des lignes, une cellule = une colonne).
+function opsLignesDepuisDocx(buf: Buffer): any[][] {
+  const zip = new AdmZip(buf);
+  const entree = zip.getEntry('word/document.xml');
+  if (!entree) throw new Error('Document Word illisible.');
+  const xml = entree.getData().toString('utf8');
+  const lignes: any[][] = [];
+  const texteDe = (frag: string) => frag.replace(/<w:tab[^>]*\/>/g, ' ')
+    .split(/<w:t[^>]*>/).slice(1).map(x => x.split('</w:t>')[0]).join('')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+  for (const tbl of xml.split('<w:tbl>').slice(1)) {
+    const corps = tbl.split('</w:tbl>')[0];
+    for (const tr of corps.split('<w:tr').slice(1)) {
+      const rowXml = tr.split('</w:tr>')[0];
+      const cellules = rowXml.split('<w:tc').slice(1).map(tc => texteDe(tc.split('</w:tc>')[0]));
+      if (cellules.length) lignes.push(cellules);
+    }
+  }
+  return lignes;
+}
+
+// 1) Lecture + aperçu (aucune écriture en base).
+app.post('/api/ops/projects/:id/import-planning', authenticateToken, requireView('opsreporting'), requireRole('editor'),
+  express.raw({ type: '*/*', limit: '15mb' }), async (req: AuthRequest, res: Response) => {
+  try {
+    const buf = req.body as Buffer;
+    if (!buf || !buf.length) return res.status(400).json({ error: 'Fichier vide.' });
+    const nom = String(req.query.filename || '').toLowerCase();
+    const projet = await pool.query('SELECT id, name FROM ops_projects WHERE id = $1', [req.params.id]);
+    if (!projet.rows[0]) return res.status(404).json({ error: 'Projet introuvable' });
+
+    let lignes: any[][];
+    if (nom.endsWith('.docx') || nom.endsWith('.doc')) {
+      lignes = opsLignesDepuisDocx(buf);
+      if (!lignes.length) return res.status(400).json({ error: "Aucun tableau trouvé dans ce document Word. Le planning doit être présenté sous forme de tableau (une ligne par jalon)." });
+    } else if (nom.endsWith('.xlsx') || nom.endsWith('.xls') || nom.endsWith('.csv')) {
+      const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
+      const feuille = wb.Sheets[wb.SheetNames[0]];
+      if (!feuille) return res.status(400).json({ error: 'Classeur vide.' });
+      lignes = XLSX.utils.sheet_to_json(feuille, { header: 1, raw: true, defval: '' }) as any[][];
+    } else {
+      return res.status(400).json({ error: 'Format non reconnu : choisissez un fichier Excel (.xlsx) ou Word (.docx).' });
+    }
+
+    const { jalons, entetes, ignorees } = opsLignesVersJalons(lignes);
+    if (!jalons.length) return res.status(400).json({ error: "Aucun jalon n'a pu être lu. Vérifiez que le fichier contient une colonne d'intitulés et une colonne de dates." });
+    res.json({ projet: projet.rows[0].name, jalons, entetes, ignorees, sansDate: jalons.filter(j => !j.echeance).length });
+  } catch (e: any) { console.error('ops import planning', e); res.status(500).json({ error: e?.message || 'Lecture impossible.' }); }
+});
+
+// 2) Création effective des jalons validés à l'écran.
+app.post('/api/ops/projects/:id/import-planning/confirmer', authenticateToken, requireView('opsreporting'), requireRole('editor'),
+  async (req: AuthRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const jalons = Array.isArray(req.body?.jalons) ? req.body.jalons : [];
+    if (!jalons.length) return res.status(400).json({ error: 'Aucun jalon à importer.' });
+    const projet = await client.query('SELECT id, name FROM ops_projects WHERE id = $1', [req.params.id]);
+    if (!projet.rows[0]) return res.status(404).json({ error: 'Projet introuvable' });
+    await client.query('BEGIN');
+    // Les jalons importés se placent à la suite de ceux déjà présents.
+    const max = await client.query('SELECT COALESCE(MAX(number), 0) AS n FROM ops_milestones WHERE project_id = $1', [req.params.id]);
+    let num = Number(max.rows[0]?.n || 0);
+    let crees = 0;
+    for (const j of jalons) {
+      const titre = String(j?.titre || '').trim();
+      if (!titre) continue;
+      num++;
+      await client.query(
+        'INSERT INTO ops_milestones (project_id, number, title, status, deadline, owner) VALUES ($1,$2,$3,$4,$5,$6)',
+        [req.params.id, num, titre.slice(0, 300), 'not_started', j?.echeance || null, String(j?.responsable || '').slice(0, 120) || null]);
+      crees++;
+    }
+    await client.query('COMMIT');
+    await logActivity(req, 'OPS_IMPORT_PLANNING', req.params.id, `A importé ${crees} jalon(s) dans le projet ${projet.rows[0].name}`);
+    broadcast('ops:changed', {});
+    res.status(201).json({ ok: true, crees });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('ops import confirmer', e); res.status(500).json({ error: 'Erreur serveur' });
+  } finally { client.release(); }
+});
+
+// ---- Archivage d'un projet : terminé ou annulé, avec justificatif obligatoire ----
+app.post('/api/ops/projects/:id/archiver', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const statut = String(req.body?.statut || '').toUpperCase();
+    const motif = String(req.body?.motif || '').trim();
+    if (statut !== 'TERMINE' && statut !== 'ANNULE') return res.status(400).json({ error: 'Indiquez si le projet est terminé ou annulé.' });
+    if (motif.length < 3) return res.status(400).json({ error: 'Le justificatif est obligatoire : expliquez pourquoi ce projet est archivé.' });
+    const r = await pool.query(
+      `UPDATE ops_projects SET archived = TRUE, archive_statut = $2, archive_motif = $3,
+              archive_at = CURRENT_TIMESTAMP, archive_par = $4 WHERE id = $1 RETURNING *`,
+      [req.params.id, statut, motif, req.user?.username || null]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Projet introuvable' });
+    await logActivity(req, 'OPS_PROJECT_ARCHIVE', req.params.id, `A archivé le projet ${r.rows[0].name} (${statut === 'TERMINE' ? 'terminé' : 'annulé'}) — ${motif}`);
+    broadcast('ops:changed', {});
+    res.json(mapOpsProject(r.rows[0]));
+  } catch (e) { console.error('ops archive', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.post('/api/ops/projects/:id/reactiver', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(
+      `UPDATE ops_projects SET archived = FALSE, archive_statut = NULL, archive_motif = NULL,
+              archive_at = NULL, archive_par = NULL WHERE id = $1 RETURNING *`, [req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Projet introuvable' });
+    await logActivity(req, 'OPS_PROJECT_REACTIVATE', req.params.id, `A réactivé le projet ${r.rows[0].name}`);
+    broadcast('ops:changed', {});
+    res.json(mapOpsProject(r.rows[0]));
+  } catch (e) { console.error('ops reactivate', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
 app.delete('/api/ops/projects/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     await pool.query('DELETE FROM ops_projects WHERE id = $1', [req.params.id]);
@@ -4112,7 +5185,8 @@ const mapLot = (r: any) => ({
   numeroCommande: r.numero_commande, dateCommande: isoDay(r.date_commande), dateReception: isoDay(r.date_reception), datePeremption: isoDay(r.date_peremption),
   quantiteG: r.quantite_g, quantiteUnite: r.quantite_unite || 'g', lossDrying: r.loss_drying, seuilLossDrying: r.seuil_loss_drying ?? null,
   aVerifierManuel: !!r.a_verifier, aVerifier: coaEffectiveVerif(r),
-  coaFichier: r.coa_fichier, coaLien: r.coa_lien, hasCoaDoc: !!r.has_doc, hasCoa: !!r.has_doc || !!(r.coa_lien && String(r.coa_lien).trim()),
+  // Une seule notion de « certificat présent » : le PDF téléversé. (Le champ coa_lien, jamais saisi, n'est plus exposé.)
+  coaFichier: r.coa_fichier, hasCoaDoc: !!r.has_doc, coaVersions: Number(r.versions_count || 0),
   commentaire: r.commentaire, uploadedBy: r.uploaded_by, createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
@@ -4123,7 +5197,8 @@ app.get('/api/coa/data', authenticateToken, requireView('coa'), async (_req: Aut
       pool.query('SELECT * FROM coa_materiau ORDER BY code'),
       pool.query('SELECT * FROM coa_reference_produit ORDER BY id'),
       pool.query(`SELECT l.*, m.code AS materiau_code, m.libelle AS materiau_libelle, m.seuil_loss_drying, m.loss_drying_applicable,
-                    (d.id IS NOT NULL) AS has_doc
+                    (d.id IS NOT NULL) AS has_doc,
+                    (SELECT COUNT(*) FROM coa_document_version v WHERE v.lot_id = l.id) AS versions_count
                   FROM coa_lot_mp l
                   LEFT JOIN coa_materiau m ON m.id = l.materiau_id
                   LEFT JOIN coa_document d ON d.lot_id = l.id
@@ -4134,7 +5209,7 @@ app.get('/api/coa/data', authenticateToken, requireView('coa'), async (_req: Aut
 });
 
 // --- Matériaux ---
-app.post('/api/coa/materiaux', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.post('/api/coa/materiaux', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const { code, libelle, seuilLossDrying, lossDryingApplicable } = req.body;
     if (!code || !libelle) return res.status(400).json({ error: 'Code et libellé requis' });
@@ -4150,7 +5225,7 @@ app.post('/api/coa/materiaux', authenticateToken, requireRole('editor'), async (
     console.error(e); res.status(500).json({ error: 'Erreur serveur' });
   }
 });
-app.patch('/api/coa/materiaux/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.patch('/api/coa/materiaux/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const map: Record<string, string> = { code: 'code', libelle: 'libelle', seuilLossDrying: 'seuil_loss_drying', lossDryingApplicable: 'loss_drying_applicable' };
     const fields: string[] = []; const values: any[] = []; let i = 1;
@@ -4166,13 +5241,21 @@ app.patch('/api/coa/materiaux/:id', authenticateToken, requireRole('editor'), as
     console.error(e); res.status(500).json({ error: 'Erreur serveur' });
   }
 });
-app.delete('/api/coa/materiaux/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
-  try { await pool.query('DELETE FROM coa_materiau WHERE id = $1', [req.params.id]); await logActivity(req, 'COA_MATERIAU_DELETE', req.params.id, `A supprimé un matériau CoA`); broadcast('coa:changed', {}); res.json({ success: true }); }
-  catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+app.delete('/api/coa/materiaux/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    // Message explicite plutôt qu'une « Erreur serveur » quand le matériau est encore utilisé.
+    const use = await pool.query('SELECT COUNT(*)::int AS n FROM coa_lot_mp WHERE materiau_id = $1', [req.params.id]);
+    const n = use.rows[0]?.n || 0;
+    if (n) return res.status(409).json({ error: `Impossible : ce matériau est utilisé par ${n} lot(s). Supprimez ou réaffectez ces lots d'abord.` });
+    await pool.query('DELETE FROM coa_reference_produit WHERE materiau_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM coa_materiau WHERE id = $1', [req.params.id]);
+    await logActivity(req, 'COA_MATERIAU_DELETE', req.params.id, `A supprimé un matériau CoA`);
+    broadcast('coa:changed', {}); res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // --- Références produit (matériau × fournisseur) ---
-app.post('/api/coa/references', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.post('/api/coa/references', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const { materiauId, fournisseur, refInterne, refClient } = req.body;
     if (!materiauId || !fournisseur) return res.status(400).json({ error: 'Matériau et fournisseur requis' });
@@ -4187,7 +5270,7 @@ app.post('/api/coa/references', authenticateToken, requireRole('editor'), async 
     console.error(e); res.status(500).json({ error: 'Erreur serveur' });
   }
 });
-app.patch('/api/coa/references/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.patch('/api/coa/references/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const map: Record<string, string> = { materiauId: 'materiau_id', fournisseur: 'fournisseur', refInterne: 'ref_interne', refClient: 'ref_client' };
     const fields: string[] = []; const values: any[] = []; let i = 1;
@@ -4200,7 +5283,7 @@ app.patch('/api/coa/references/:id', authenticateToken, requireRole('editor'), a
     res.json(mapReference(r.rows[0]));
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
-app.delete('/api/coa/references/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.delete('/api/coa/references/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try { await pool.query('DELETE FROM coa_reference_produit WHERE id = $1', [req.params.id]); broadcast('coa:changed', {}); res.json({ success: true }); }
   catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
@@ -4210,9 +5293,9 @@ const COA_LOT_FIELDS: Record<string, string> = {
   materiauId: 'materiau_id', numeroLot: 'numero_lot', fournisseur: 'fournisseur', referenceInterne: 'reference_interne',
   referenceClient: 'reference_client', numeroCommande: 'numero_commande', dateCommande: 'date_commande', dateReception: 'date_reception',
   datePeremption: 'date_peremption', quantiteG: 'quantite_g', quantiteUnite: 'quantite_unite', lossDrying: 'loss_drying', aVerifierManuel: 'a_verifier',
-  coaLien: 'coa_lien', commentaire: 'commentaire',
+  commentaire: 'commentaire',
 };
-app.post('/api/coa/lots', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.post('/api/coa/lots', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     if (!req.body.numeroLot || !req.body.fournisseur) return res.status(400).json({ error: 'Numéro de lot et fournisseur requis' });
     const cols: string[] = []; const ph: string[] = []; const values: any[] = []; let i = 1;
@@ -4224,7 +5307,7 @@ app.post('/api/coa/lots', authenticateToken, requireRole('editor'), async (req: 
     res.status(201).json({ id: r.rows[0].id });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
-app.patch('/api/coa/lots/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.patch('/api/coa/lots/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     const fields: string[] = []; const values: any[] = []; let i = 1;
     for (const k of Object.keys(COA_LOT_FIELDS)) if (req.body[k] !== undefined) { fields.push(`${COA_LOT_FIELDS[k]} = $${i++}`); values.push(req.body[k] === '' ? null : req.body[k]); }
@@ -4237,13 +5320,21 @@ app.patch('/api/coa/lots/:id', authenticateToken, requireRole('editor'), async (
     res.json({ id: r.rows[0].id });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
-app.delete('/api/coa/lots/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
-  try { await pool.query('DELETE FROM coa_lot_mp WHERE id = $1', [req.params.id]); await logActivity(req, 'COA_LOT_DELETE', req.params.id, `A supprimé le lot MP ${req.params.id}`); broadcast('coa:changed', {}); res.json({ success: true }); }
-  catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+app.delete('/api/coa/lots/:id', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    // Un lot qui porte un certificat ne se supprime pas : il faut d'abord retirer le CoA (qui sera archivé).
+    const doc = await pool.query('SELECT nom_fichier FROM coa_document WHERE lot_id = $1', [req.params.id]);
+    if (doc.rows[0]) return res.status(409).json({ error: 'Ce lot porte un certificat (CoA). Retirez d\'abord le CoA — il restera dans l\'historique — puis supprimez le lot.' });
+    const vers = await pool.query('SELECT COUNT(*)::int AS n FROM coa_document_version WHERE lot_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM coa_lot_mp WHERE id = $1', [req.params.id]);
+    const nVersions = vers.rows[0]?.n || 0;
+    await logActivity(req, 'COA_LOT_DELETE', req.params.id, `A supprimé le lot MP ${req.params.id}${nVersions ? ` (${nVersions} certificat(s) archivé(s) supprimé(s) avec lui)` : ''}`);
+    broadcast('coa:changed', {}); res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // --- Document CoA (PDF stocké en base, un par lot) ---
-app.post('/api/coa/lots/:id/document', authenticateToken, requireRole('editor'), express.raw({ type: '*/*', limit: '25mb' }), async (req: AuthRequest, res: Response) => {
+app.post('/api/coa/lots/:id/document', authenticateToken, requireView('coa'), requireRole('editor'), express.raw({ type: '*/*', limit: '25mb' }), async (req: AuthRequest, res: Response) => {
   try {
     const buf = req.body as Buffer;
     if (!buf || !buf.length) return res.status(400).json({ error: 'Fichier vide' });
@@ -4251,6 +5342,13 @@ app.post('/api/coa/lots/:id/document', authenticateToken, requireRole('editor'),
     const mime = req.headers['content-type'] && req.headers['content-type'] !== 'application/octet-stream' ? String(req.headers['content-type']) : 'application/pdf';
     const lot = await pool.query('SELECT id FROM coa_lot_mp WHERE id = $1', [req.params.id]);
     if (!lot.rows[0]) return res.status(404).json({ error: 'Lot introuvable' });
+    // Un certificat déjà présent n'est jamais écrasé : on l'archive d'abord (traçabilité ISO 13485).
+    await pool.query(
+      `INSERT INTO coa_document_version (lot_id, nom_fichier, type_mime, taille_octets, contenu, uploaded_by, uploaded_at, archived_by, motif)
+       SELECT lot_id, nom_fichier, type_mime, taille_octets, contenu, uploaded_by, uploaded_at, $2, 'Remplacé par un nouveau certificat'
+         FROM coa_document WHERE lot_id = $1`,
+      [req.params.id, req.user?.username || null]
+    );
     await pool.query(
       `INSERT INTO coa_document (lot_id, nom_fichier, type_mime, taille_octets, contenu, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -4273,12 +5371,46 @@ app.get('/api/coa/lots/:id/document', authenticateToken, requireView('coa'), asy
     res.send(doc.contenu);
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
-app.delete('/api/coa/lots/:id/document', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+app.delete('/api/coa/lots/:id/document', authenticateToken, requireView('coa'), requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
+    // Le certificat retiré est archivé (jamais détruit) puis la suppression est journalisée.
+    const arch = await pool.query(
+      `INSERT INTO coa_document_version (lot_id, nom_fichier, type_mime, taille_octets, contenu, uploaded_by, uploaded_at, archived_by, motif)
+       SELECT lot_id, nom_fichier, type_mime, taille_octets, contenu, uploaded_by, uploaded_at, $2, 'Retiré du lot'
+         FROM coa_document WHERE lot_id = $1 RETURNING nom_fichier`,
+      [req.params.id, req.user?.username || null]
+    );
+    if (!arch.rows[0]) return res.status(404).json({ error: 'Aucun certificat à retirer sur ce lot.' });
     await pool.query('DELETE FROM coa_document WHERE lot_id = $1', [req.params.id]);
     await pool.query('UPDATE coa_lot_mp SET coa_fichier = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [req.params.id]);
+    await logActivity(req, 'COA_DOC_DELETE', req.params.id, `A retiré le CoA du lot ${req.params.id} (${arch.rows[0].nom_fichier}) — archivé dans l'historique`);
     broadcast('coa:changed', {});
     res.json({ success: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// --- Historique des certificats d'un lot (versions remplacées ou retirées) ---
+app.get('/api/coa/lots/:id/versions', authenticateToken, requireView('coa'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, nom_fichier, taille_octets, uploaded_by, uploaded_at, archived_at, archived_by, motif
+         FROM coa_document_version WHERE lot_id = $1 ORDER BY archived_at DESC, id DESC`,
+      [req.params.id]
+    );
+    res.json(r.rows.map((v: any) => ({
+      id: v.id, nomFichier: v.nom_fichier, taille: v.taille_octets,
+      deposePar: v.uploaded_by, deposeLe: v.uploaded_at, archiveLe: v.archived_at, archivePar: v.archived_by, motif: v.motif,
+    })));
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.get('/api/coa/versions/:versionId/document', authenticateToken, requireView('coa'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT nom_fichier, type_mime, contenu FROM coa_document_version WHERE id = $1', [req.params.versionId]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'Version introuvable' });
+    const doc = r.rows[0];
+    res.setHeader('Content-Type', doc.type_mime || 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(doc.nom_fichier || 'coa.pdf')}"`);
+    res.send(doc.contenu);
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
@@ -4455,7 +5587,7 @@ const mapPlProduct = (r: any) => ({
   boxWeightKg: r.box_weight_kg === null ? null : Number(r.box_weight_kg),
   capacityPerCarton: r.capacity_per_carton === null ? null : Number(r.capacity_per_carton),
 });
-const mapPlClient = (r: any) => ({ id: r.id, name: r.name, address: r.address, customerId: r.customer_id });
+const mapPlClient = (r: any) => ({ id: r.id, name: r.name, address: r.address, customerId: r.customer_id, email: r.email || '' });
 const mapPlDoc = (r: any) => ({
   id: r.id, invoiceNo: r.invoice_no, docDate: r.doc_date, rev: r.rev,
   clientName: r.client_name, clientAddress: r.client_address,
@@ -4504,11 +5636,11 @@ app.get('/api/pl/clients', authenticateToken, requireView('pl'), async (_req: Au
 });
 app.post('/api/pl/clients', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, address, customerId } = req.body;
+    const { name, address, customerId, email } = req.body;
     if (!name) return res.status(400).json({ error: 'Nom requis' });
     const r = await pool.query(
-      'INSERT INTO pl_clients (name, address, customer_id) VALUES ($1,$2,$3) RETURNING *',
-      [name, address || '', customerId || '']);
+      'INSERT INTO pl_clients (name, address, customer_id, email) VALUES ($1,$2,$3,$4) RETURNING *',
+      [name, address || '', customerId || '', email || '']);
     await logActivity(req, 'PL_CLIENT_CREATE', String(r.rows[0].id), `A créé le client Packing List ${name}`);
     broadcast('pl:changed', {});
     res.status(201).json(mapPlClient(r.rows[0]));
@@ -4519,7 +5651,7 @@ app.post('/api/pl/clients', authenticateToken, requireRole('editor'), async (req
 });
 app.patch('/api/pl/clients/:id', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
-    const map: Record<string, string> = { name: 'name', address: 'address', customerId: 'customer_id' };
+    const map: Record<string, string> = { name: 'name', address: 'address', customerId: 'customer_id', email: 'email' };
     const fields: string[] = []; const values: any[] = []; let i = 1;
     for (const k of Object.keys(map)) if (req.body[k] !== undefined) { fields.push(`${map[k]} = $${i++}`); values.push(req.body[k]); }
     if (!fields.length) return res.status(400).json({ error: 'Rien à modifier' });
@@ -4558,6 +5690,56 @@ app.patch('/api/pl/sites/:id', authenticateToken, requireRole('editor'), async (
     broadcast('pl:changed', {});
     res.json(r.rows[0]);
   } catch (e) { console.error('pl site patch', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Import d'un document (bon de commande, proforma…) en PDF : l'IA en extrait les lignes.
+// Rien n'est enregistré : les lignes sont renvoyées au navigateur pour vérification par Abdel.
+app.post('/api/pl/extract', authenticateToken, requireView('pl'), async (req: AuthRequest, res: Response) => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return res.status(503).json({ error: 'Lecture IA non configurée (clé GEMINI_API_KEY manquante côté serveur). Saisie manuelle possible.' });
+  const b64 = String(req.body?.file || '');
+  if (!b64) return res.status(400).json({ error: 'Aucun fichier reçu' });
+  let uploaded: any = null;
+  try {
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) return res.status(400).json({ error: 'Fichier vide ou illisible' });
+    uploaded = await geminiUploadPdf(key, buf, String(req.body?.name || 'document.pdf'), 20);
+    if (!uploaded?.ok || !uploaded.fileUri) return res.status(502).json({ error: "Le document n'a pas pu être transmis à l'IA. Réessaie." });
+
+    const prompt = `Tu lis un document commercial (bon de commande, facture proforma, confirmation de commande) d'un laboratoire de dispositifs médicaux injectables.
+Extrais UNIQUEMENT les lignes d'articles commandés. Pour chaque ligne :
+- "ref" : la référence article (ex. "HG-A1", "DB-IRA"). Chaîne vide si absente.
+- "product" : la désignation du produit.
+- "qty" : la quantité en BOÎTES (nombre entier). Si la quantité est donnée en seringues/flacons/unités, garde le nombre tel quel et signale-le dans "note".
+- "lot" : le numéro de lot s'il figure sur le document, sinon chaîne vide.
+- "expiry" : la date de péremption au format MM/AAAA si elle figure, sinon chaîne vide.
+- "unitPrice" : le prix unitaire HT en euros (nombre, point décimal), 0 si absent.
+- "note" : une remarque courte en français si quelque chose est ambigu, sinon chaîne vide.
+Ignore les lignes de total, de frais de port, de taxes et de remise.
+Donne aussi "clientName" (le client destinataire) et "invoiceNo" (le numéro de commande/facture du document) s'ils sont lisibles, sinon chaîne vide.
+Réponds UNIQUEMENT en JSON : {"clientName":"...","invoiceNo":"...","lines":[{"ref":"","product":"","qty":0,"lot":"","expiry":"","unitPrice":0,"note":""}]}`;
+
+    const data = await geminiGenerateJson(key, process.env.GEMINI_MODEL || 'gemini-2.5-flash', [uploaded.fileUri], prompt, { maxOutputTokens: 8192, logLabel: 'pl-extract' });
+    if (!data) return res.status(502).json({ error: "L'IA n'a pas réussi à lire ce document. Réessaie ou saisis les lignes à la main." });
+
+    const lines = (Array.isArray(data.lines) ? data.lines : []).map((l: any) => ({
+      ref: String(l?.ref ?? '').trim(),
+      product: String(l?.product ?? '').trim(),
+      qty: Number(l?.qty) || 0,
+      lot: String(l?.lot ?? '').trim(),
+      expiry: String(l?.expiry ?? '').trim(),
+      unitPrice: Number(l?.unitPrice) || 0,
+      note: String(l?.note ?? '').trim(),
+    })).filter((l: any) => l.product || l.ref);
+
+    await logActivity(req, 'PL_IMPORT_EXTRACT', null, `Import IA d'un document Packing List : ${lines.length} ligne(s) extraite(s)`);
+    res.json({ clientName: String(data.clientName || '').trim(), invoiceNo: String(data.invoiceNo || '').trim(), lines });
+  } catch (e: any) {
+    console.error('pl extract', e);
+    res.status(502).json({ error: e?.message || 'Lecture du document impossible.' });
+  } finally {
+    if (uploaded?.fileName) geminiDeleteFile(key, uploaded.fileName);
+  }
 });
 
 app.get('/api/pl/documents', authenticateToken, requireView('pl'), async (_req: AuthRequest, res: Response) => {
@@ -4704,6 +5886,171 @@ app.post('/api/ventes/archive', authenticateToken, requireRole('editor'), async 
   } catch (e) { console.error('ventes archive', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
+// ---- Révisions du forecast (photos figées d'une année) ----
+const revLignes = (rows: any[]) => rows.map(r => ({
+  id: r.id, pays: r.pays || '', ligneProduit: r.ligne_produit || '', produit: r.produit || '', codeOdoo: r.code_odoo || '',
+  prixUnitaire: Number(r.prix_unitaire) || 0, qty: Array.isArray(r.qty) ? r.qty.map((n: any) => Number(n) || 0) : Array(12).fill(0),
+}));
+const revTotalCa = (lignes: any[]) => lignes.reduce((s, l) => s + l.qty.reduce((a: number, b: number) => a + b, 0) * l.prixUnitaire, 0);
+
+// Fige l'état actuel d'une année. Interne (réutilisé avant une restauration).
+async function creerRevision(year: number, nom: string, commentaire: string | null, auteur: string | null) {
+  const r = await pool.query('SELECT * FROM ventes_forecast WHERE year = $1 ORDER BY pays, produit', [year]);
+  const lignes = revLignes(r.rows);
+  const ins = await pool.query(
+    `INSERT INTO ventes_revision (year, nom, commentaire, lignes, total_ca, cree_par)
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6) RETURNING id, cree_le`,
+    [year, nom, commentaire, JSON.stringify(lignes), revTotalCa(lignes), auteur]
+  );
+  return { id: ins.rows[0].id, creeLe: ins.rows[0].cree_le, nbLignes: lignes.length };
+}
+
+app.post('/api/ventes/revisions', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const year = Number(req.body?.year);
+    const nom = String(req.body?.nom || '').trim();
+    if (!year || !nom) return res.status(400).json({ error: 'Année et nom de la révision requis.' });
+    const nb = await pool.query('SELECT COUNT(*)::int AS n FROM ventes_forecast WHERE year = $1', [year]);
+    if (!nb.rows[0]?.n) return res.status(400).json({ error: `Aucune ligne de forecast en ${year} : rien à figer.` });
+    const out = await creerRevision(year, nom, req.body?.commentaire || null, req.user?.username || null);
+    await logActivity(req, 'VENTES_REVISION_CREATE', String(out.id), `A figé la révision « ${nom} » du forecast ${year} (${out.nbLignes} lignes)`);
+    broadcast('ventes:changed', {});
+    res.status(201).json(out);
+  } catch (e) { console.error('ventes revision create', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.get('/api/ventes/revisions', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const year = Number(req.query.year);
+    const r = await pool.query(
+      `SELECT id, year, nom, commentaire, total_ca, cree_par, cree_le, jsonb_array_length(lignes) AS nb_lignes
+         FROM ventes_revision ${year ? 'WHERE year = $1' : ''} ORDER BY cree_le DESC, id DESC`,
+      year ? [year] : []
+    );
+    res.json(r.rows.map((v: any) => ({
+      id: v.id, year: v.year, nom: v.nom, commentaire: v.commentaire, totalCa: Number(v.total_ca) || 0,
+      creePar: v.cree_par, creeLe: v.cree_le, nbLignes: v.nb_lignes,
+    })));
+  } catch (e) { console.error('ventes revisions', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.get('/api/ventes/revisions/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT * FROM ventes_revision WHERE id = $1', [req.params.id]);
+    const v = r.rows[0];
+    if (!v) return res.status(404).json({ error: 'Révision introuvable' });
+    res.json({ id: v.id, year: v.year, nom: v.nom, commentaire: v.commentaire, totalCa: Number(v.total_ca) || 0, creePar: v.cree_par, creeLe: v.cree_le, lignes: v.lignes });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+// Restauration : on fige d'abord l'état courant (rien n'est jamais perdu), puis on repose les quantités.
+app.post('/api/ventes/revisions/:id/restore', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query('SELECT * FROM ventes_revision WHERE id = $1', [req.params.id]);
+    const rev = r.rows[0];
+    if (!rev) return res.status(404).json({ error: 'Révision introuvable' });
+    const actuelles = await pool.query('SELECT id FROM ventes_forecast WHERE year = $1', [rev.year]);
+    if (actuelles.rows.length) await creerRevision(rev.year, `Avant restauration de « ${rev.nom} »`, 'Photo automatique prise juste avant une restauration.', req.user?.username || null);
+    const existantes = new Set(actuelles.rows.map((x: any) => x.id));
+    let restaurees = 0, absentes = 0;
+    for (const l of (rev.lignes as any[])) {
+      if (!existantes.has(l.id)) { absentes++; continue; }
+      await pool.query('UPDATE ventes_forecast SET qty = $2::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [l.id, JSON.stringify(l.qty)]);
+      restaurees++;
+    }
+    await logActivity(req, 'VENTES_REVISION_RESTORE', String(rev.id), `A restauré la révision « ${rev.nom} » du forecast ${rev.year} (${restaurees} ligne(s))`);
+    broadcast('ventes:changed', {});
+    res.json({ ok: true, restaurees, absentes });
+  } catch (e) { console.error('ventes revision restore', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+// Prépare l'année suivante : même structure (pays / produit / prix / code Odoo), 12 mois à zéro.
+app.post('/api/ventes/nouvelle-annee', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  try {
+    const source = Number(req.body?.source), cible = Number(req.body?.cible);
+    if (!source || !cible) return res.status(400).json({ error: 'Année source et année cible requises.' });
+    if (source === cible) return res.status(400).json({ error: 'Les deux années doivent être différentes.' });
+    const dejaLa = await pool.query('SELECT COUNT(*)::int AS n FROM ventes_forecast WHERE year = $1', [cible]);
+    if (dejaLa.rows[0]?.n) return res.status(409).json({ error: `Le forecast ${cible} contient déjà ${dejaLa.rows[0].n} ligne(s). Rien n'a été copié pour ne pas les écraser.` });
+    const src = await pool.query('SELECT * FROM ventes_forecast WHERE year = $1', [source]);
+    if (!src.rows.length) return res.status(400).json({ error: `Aucune ligne à copier en ${source}.` });
+    const zero = JSON.stringify(Array(12).fill(0));
+    for (const l of src.rows) {
+      await pool.query(
+        `INSERT INTO ventes_forecast (year, pays, ligne_produit, produit, code_odoo, prix_unitaire, qty, retire, archived)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, FALSE, FALSE)`,
+        [cible, l.pays, l.ligne_produit, l.produit, l.code_odoo, l.prix_unitaire, zero]
+      );
+    }
+    await logActivity(req, 'VENTES_NOUVELLE_ANNEE', String(cible), `A préparé le forecast ${cible} à partir de ${source} (${src.rows.length} lignes, quantités vides)`);
+    broadcast('ventes:changed', {});
+    res.status(201).json({ ok: true, lignes: src.rows.length, cible });
+  } catch (e) { console.error('ventes nouvelle annee', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// ===================== Poste de pilotage « Aujourd'hui » =====================
+// Une seule requête qui répond à « qu'est-ce qui doit avancer aujourd'hui ? ».
+// Chaque bloc est indépendant : si l'un échoue, les autres restent affichés.
+const PREP_TASK_IDS = ['bon_cmd_client', 'bc_cmo', 'bc_sylexia', 'bc_ipc_epc', 'ddl_of', 'maj_stock_odoo', 'scan_ddl'];
+const LOT_FIGE_JOURS = 21;
+
+app.get('/api/pilotage', authenticateToken, async (_req: AuthRequest, res: Response) => {
+  const bloc = async (fn: () => Promise<any[]>) => { try { return await fn(); } catch (e) { console.error('pilotage', e); return []; } };
+  try {
+    const actifs = `cloture IS NOT TRUE AND process_stage IS DISTINCT FROM 'EXPEDIE'`;
+    const [enRetard, figes, bloques, prepIncomplete, ddlEnAttente, expeditions, nonFactures] = await Promise.all([
+      // 1. Fin de fabrication dépassée alors que le lot n'est pas parti.
+      bloc(async () => (await pool.query(
+        `SELECT id, client, product, enddate, deliverydate, process_stage, responsable
+           FROM batches WHERE ${actifs} AND enddate IS NOT NULL AND enddate < CURRENT_DATE
+          ORDER BY enddate ASC LIMIT 50`)).rows),
+      // 2. Lots qui ne bougent plus depuis longtemps.
+      bloc(async () => (await pool.query(
+        `SELECT id, client, product, process_stage, responsable, stage_since,
+                EXTRACT(DAY FROM (CURRENT_TIMESTAMP - stage_since))::int AS jours
+           FROM batches WHERE ${actifs} AND stage_since IS NOT NULL
+            AND stage_since < CURRENT_TIMESTAMP - ($1 || ' days')::interval
+          ORDER BY stage_since ASC LIMIT 50`, [LOT_FIGE_JOURS])).rows),
+      // 3. Lots explicitement déclarés bloqués.
+      bloc(async () => (await pool.query(
+        `SELECT id, client, product, process_stage, responsable, blocage_motif
+           FROM batches WHERE ${actifs} AND COALESCE(blocage_motif, '') <> ''
+          ORDER BY startdate ASC NULLS LAST LIMIT 50`)).rows),
+      // 4. Production dans moins de 7 jours mais préparation incomplète.
+      bloc(async () => (await pool.query(
+        `SELECT id, client, product, startdate, responsable, preptasks
+           FROM batches WHERE ${actifs} AND startdate IS NOT NULL
+            AND startdate BETWEEN CURRENT_DATE AND CURRENT_DATE + 7
+          ORDER BY startdate ASC LIMIT 50`)).rows
+        .map((r: any) => {
+          const t = r.preptasks || {};
+          const manquantes = PREP_TASK_IDS.filter(k => !t[k]);
+          return { ...r, preptasks: undefined, manquantes, nbManquantes: manquantes.length };
+        })
+        .filter((r: any) => r.nbManquantes > 0)),
+      // 5. Dossiers de lot envoyés en validation et toujours pas validés à l'approche de la production.
+      bloc(async () => (await pool.query(
+        `SELECT d.id, d.lot, d.status, d.ddl_number, d.created_at, b.startdate
+           FROM prepprod_ddl d
+           LEFT JOIN batches b ON ${LOT_KEY_SQL('b.id')} = ${LOT_KEY_SQL('d.lot')}
+          WHERE d.status IN ('GENERE', 'EN_VALIDATION')
+            AND (b.startdate IS NULL OR b.startdate <= CURRENT_DATE + 7)
+          ORDER BY b.startdate ASC NULLS LAST LIMIT 50`)).rows),
+      // 6. Ce qui doit partir cette semaine.
+      bloc(async () => (await pool.query(
+        `SELECT id, client, product, deliverydate, process_stage, quality_status, responsable
+           FROM batches WHERE ${actifs} AND deliverydate BETWEEN CURRENT_DATE AND CURRENT_DATE + 7
+          ORDER BY deliverydate ASC LIMIT 50`)).rows),
+      // 7. Lots expédiés dont aucun document de facturation ne porte le n° de lot.
+      bloc(async () => (await pool.query(
+        `SELECT b.id, b.client, b.product, b.deliverydate
+           FROM batches b
+          WHERE b.process_stage = 'EXPEDIE' AND b.cloture IS NOT TRUE
+            AND NOT EXISTS (
+              SELECT 1 FROM pl_documents d, jsonb_array_elements(COALESCE(d.lines, '[]'::jsonb)) l
+               WHERE ${LOT_KEY_SQL("l->>'lot'")} = ${LOT_KEY_SQL('b.id')})
+          ORDER BY b.deliverydate DESC NULLS LAST LIMIT 50`)).rows),
+    ]);
+    res.json({ enRetard, figes, bloques, prepIncomplete, ddlEnAttente, expeditions, nonFactures, seuilFigeJours: LOT_FIGE_JOURS });
+  } catch (e) { console.error('pilotage', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
 // CA réalisé mensuel depuis Odoo (factures clients postées) — total par mois pour une année + société
 app.get('/api/ventes/odoo-monthly', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -4823,9 +6170,10 @@ app.put('/api/settings/fluxConfig', authenticateToken, requireRole('admin'), asy
 
 app.get('/api/settings/clients', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const result = await pool.query("SELECT value FROM settings WHERE key = 'clients'");
-    const clients = result.rows.length > 0 ? result.rows[0].value : DEFAULT_CLIENTS;
-    res.json(clients);
+    // Source UNIQUE des clients : la table pl_clients (fusionnée au démarrage avec l'ancienne
+    // liste des réglages et les clients déjà présents sur les lots). Plus de listes divergentes.
+    const result = await pool.query('SELECT name FROM pl_clients ORDER BY name');
+    res.json(result.rows.map((r: any) => r.name));
   } catch (error) {
     console.error('Error fetching clients:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -4834,13 +6182,15 @@ app.get('/api/settings/clients', authenticateToken, async (req: AuthRequest, res
 
 app.put('/api/settings/clients', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
   try {
-    const clients = req.body;
-    await pool.query(
-      `INSERT INTO settings (key, value) VALUES ('clients', $1)
-       ON CONFLICT (key) DO UPDATE SET value = $1`,
-      [JSON.stringify(clients)]
-    );
+    const clients: string[] = Array.isArray(req.body) ? req.body : [];
+    // On alimente le référentiel unique. On n'y supprime rien : un client retiré de la liste
+    // resterait référencé par des lots ou des factures déjà émis.
+    for (const nom of clients) {
+      const n = String(nom || '').trim();
+      if (n) await pool.query('INSERT INTO pl_clients (name) VALUES ($1) ON CONFLICT (name) DO NOTHING', [n]);
+    }
     broadcast('settings:updated', { key: 'clients', clients });
+    broadcast('pl:changed', {});
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating clients:', error);
@@ -5317,7 +6667,12 @@ app.post('/api/prepprod/ddl-generate', authenticateToken, requireRole('editor'),
     if (!graphConfigured()) return res.status(503).json({ error: 'Connexion SharePoint non configurée sur ce serveur (fonctionne en production).' });
     const { itemId, lot, family, templateName } = req.body || {};
     if (!itemId || !lot) return res.status(400).json({ error: 'Modèle et n° de lot requis' });
-    const lotClean = String(lot).trim().slice(0, 40);
+    // Le n° de lot est normalisé (majuscules, sans espaces parasites) puis vérifié : il doit exister
+    // dans les lots de production, sinon le dossier de lot se retrouve rattaché à rien.
+    const lotConnu = await pool.query(`SELECT id FROM batches WHERE ${LOT_KEY_SQL('id')} = $1`, [normLot(lot)]);
+    if (!lotConnu.rows[0]) return res.status(400).json({ error: `Le lot « ${String(lot).trim()} » n'existe pas dans le suivi de production. Choisissez-le dans la liste déroulante, ou créez d'abord le lot.` });
+    // On repart TOUJOURS du numéro officiel du lot, pas de ce qui a été tapé.
+    const lotClean = String(lotConnu.rows[0].id).slice(0, 40);
     const lotEsc = lotClean.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const drive = process.env.GRAPH_DRIVE_ID;
     const buf = await graphGetBuffer(`${GRAPH}/drives/${drive}/items/${encodeURIComponent(String(itemId))}/content`);
@@ -5383,8 +6738,8 @@ app.get('/api/prepprod/ddl/:id/pdf', authenticateToken, requireView('prepprod'),
   try {
     const r = await pool.query('SELECT pdf_filename, pdf FROM prepprod_ddl WHERE id=$1', [req.params.id]);
     if (!r.rows[0] || !r.rows[0].pdf) return res.status(404).json({ error: 'Introuvable' });
-    res.setHeader('Content-Type', ddlAttMime(r.rows[0].pdf_filename));
-    res.setHeader('Content-Disposition', `attachment; filename="${r.rows[0].pdf_filename || 'ddl.docx'}"`);
+    res.setHeader('Content-Type', ddlAttMime(r.rows[0].pdf));
+    res.setHeader('Content-Disposition', `attachment; filename="${ddlAttName(r.rows[0].pdf_filename, 'ddl', r.rows[0].pdf)}"`);
     res.send(r.rows[0].pdf);
   } catch (e) { console.error('ddl pdf', e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
@@ -5394,18 +6749,63 @@ app.get('/api/prepprod/ddl/:id/pdf', authenticateToken, requireView('prepprod'),
 // Nécessite la permission Graph « Mail.ReadWrite ».
 const DDL_PRRC_EMAIL = process.env.DDL_PRRC_EMAIL || 'f.hadjab@louna-aesthetics.com';
 const DDL_MAIL_FROM = process.env.DDL_MAIL_FROM || 'a.hadjab@louna-aesthetics.com';
+// Destinataire systématiquement en copie de tous les emails de l'application.
+const MAIL_CC_EMAIL = process.env.MAIL_CC_EMAIL || 'a.jebari@louna-aesthetics.com';
+const MAIL_CC = [{ emailAddress: { address: MAIL_CC_EMAIL } }];
+// Destinataires principaux par défaut des brouillons « Goods Ready for Collection »
+// (Packing List). Modifiables sans redéployer via PL_MAIL_TO (adresses séparées par des virgules),
+// et modifiables à la main dans Outlook avant l'envoi.
+const PL_MAIL_TO = (process.env.PL_MAIL_TO || 'm.ali@dermacity.net,a.badran@dermacity.net,a.badran@masteryavenue.com')
+  .split(',').map(a => a.trim()).filter(Boolean)
+  .map(address => ({ emailAddress: { address } }));
+// Signature commune à tous les emails générés par l'application.
+const MAIL_SIGNATURE_HTML =
+  `<p style="margin-top:16px">Bien cordialement,<br><b>Assistant Maya</b><br>Agent IA travaillant avec Abdel HADJAB<br>Louna Aesthetics SAS</p>`;
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-// Type de la pièce jointe selon l'extension du fichier stocké (.docx = Word, sinon PDF pour les anciens enregistrements).
-const ddlAttMime = (name?: string) => /\.docx$/i.test(String(name || '')) ? DOCX_MIME : 'application/pdf';
+// Le type de la pièce jointe est déduit du CONTENU du fichier, pas de son nom : un .docx est un ZIP (signature « PK »),
+// un PDF commence par « %PDF ». Un enregistrement ancien nommé .docx mais contenant un PDF est ainsi détecté.
+const ddlIsWord = (buf: any) => Buffer.isBuffer(buf) && buf.length > 1 && buf[0] === 0x50 && buf[1] === 0x4b;
+const ddlAttMime = (buf: any) => ddlIsWord(buf) ? DOCX_MIME : 'application/pdf';
+// Nom de pièce jointe cohérent avec le contenu réel (évite un fichier Word portant l'extension .pdf).
+const ddlAttName = (name: string | null, lot: string, buf: any) =>
+  String(name || `DDL_${lot}`).replace(/\.(docx|pdf)$/i, '') + (ddlIsWord(buf) ? '.docx' : '.pdf');
+// --- HAR (Louna Filler / Essentyal) : les phases suivent la formulation ---------------
+// Un lot HAR se fabrique en plusieurs étapes : la FORMULATION, puis les phases LINÉAIRE,
+// RÉTICULÉ et SOLUTION TAMPON. Ces phases sont fabriquées dans la même campagne : leurs
+// dates de début de fabrication et de mise à disposition doivent être IDENTIQUES à celles
+// du DDL de formulation. Leur propre n° de lot n'existe pas toujours dans le suivi de
+// production, d'où des dates « à confirmer » sans ce rattachement.
+const ddlNorm = (s: any) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const ddlEstFormulation = (x: any) => /formulation/.test(ddlNorm(`${x.template_name} ${x.ddl_number} ${x.family}`));
+const ddlEstPhase = (x: any) => /(lineaire|reticul|solution|tampon)/.test(ddlNorm(`${x.template_name} ${x.ddl_number}`));
+// Date de début de fabrication du DDL de formulation le plus récent de la même famille.
+async function ddlDateFormulationFamille(family: string | null): Promise<string | null> {
+  if (!family) return null;
+  try {
+    const q = await pool.query(
+      `SELECT b.startdate FROM prepprod_ddl d
+       JOIN batches b ON ${LOT_KEY_SQL('b.id')} = ${LOT_KEY_SQL('d.lot')}
+       WHERE d.family = $1 AND b.startdate IS NOT NULL
+         AND (COALESCE(d.template_name,'') || ' ' || COALESCE(d.ddl_number,'')) ILIKE '%formulation%'
+       ORDER BY d.created_at DESC LIMIT 1`, [family]);
+    return q.rows[0]?.startdate || null;
+  } catch { return null; }
+}
+
 app.post('/api/prepprod/ddl/:id/send-validation', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
   try {
     if (!graphConfigured()) return res.json({ sent: false, reason: 'graph-off' });
     const r = await pool.query('SELECT lot, family, template_name, ddl_number, ddl_version, application_date, pdf_filename, pdf FROM prepprod_ddl WHERE id=$1', [req.params.id]);
     const row = r.rows[0];
-    if (!row || !row.pdf) return res.status(404).json({ error: 'PDF introuvable' });
+    if (!row || !row.pdf) return res.status(404).json({ error: 'Dossier de lot introuvable' });
+    // Le PRRC doit recevoir un fichier Word modifiable. Un dossier généré avant le passage au Word contient un PDF :
+    // on refuse l'envoi plutôt que de joindre le mauvais format, et on indique quoi faire.
+    if (!ddlIsWord(row.pdf)) return res.status(409).json({ error: `Ce dossier de lot (${row.lot}) a été généré à l'ancien format PDF. Regénérez-le pour obtenir le fichier Word, puis relancez la demande de validation.` });
     // Date de début de fabrication du lot (onglet Tracking Production) + échéance de validation à 5 j ouvrés avant.
     let startDate: string | null = null;
     try { const bq = await pool.query('SELECT startdate FROM batches WHERE UPPER(id)=UPPER($1) LIMIT 1', [row.lot]); startDate = bq.rows[0]?.startdate || null; } catch { /* best-effort */ }
+    // Phase HAR (linéaire / réticulé / solution tampon) : on aligne sur le DDL de formulation.
+    if (ddlEstPhase(row)) startDate = (await ddlDateFormulationFamille(row.family)) || startDate;
     const validBy = startDate ? subBusinessDaysIso(startDate, 5) : null;
     const subject = `Validation DDL – lot ${row.lot}${row.ddl_number ? ` (${row.ddl_number} v${row.ddl_version || '—'})` : ''}${startDate ? ` – production le ${fmtFrDate(startDate)}` : ''}`;
     const content =
@@ -5423,16 +6823,17 @@ app.post('/api/prepprod/ddl/:id/send-validation', authenticateToken, requireRole
     <b>Échéance :</b> merci de <b>valider et imprimer</b> ce DDL <b>au plus tard le ${validBy ? fmtFrDate(validBy) : 'à définir dès que la date de production est connue'}</b>${validBy ? ' (soit <b>5 jours ouvrés avant la date de production</b>)' : ''}, puis de me le <b>mettre à disposition (validé et imprimé)</b> afin que je puisse finaliser le dossier de lot dans les délais.
   </p>
   <p>Merci de me confirmer la <b>validation et l'impression</b>, ou de me signaler toute correction nécessaire.</p>
-  <p style="margin-top:16px">Bien cordialement,<br><b>Abdel HADJAB</b><br>Operation Director<br>Louna Aesthetics SAS</p>
+  ${MAIL_SIGNATURE_HTML}
 </div>`;
     const draftPayload = JSON.stringify({
       subject,
       body: { contentType: 'HTML', content },
       toRecipients: [{ emailAddress: { address: DDL_PRRC_EMAIL } }],
+      ccRecipients: MAIL_CC,
       attachments: [{
         '@odata.type': '#microsoft.graph.fileAttachment',
-        name: row.pdf_filename || `DDL_${row.lot}.docx`,
-        contentType: ddlAttMime(row.pdf_filename),
+        name: ddlAttName(row.pdf_filename, row.lot, row.pdf),
+        contentType: ddlAttMime(row.pdf),
         contentBytes: Buffer.from(row.pdf).toString('base64'),
       }],
     });
@@ -5451,7 +6852,7 @@ app.post('/api/prepprod/ddl/:id/send-validation', authenticateToken, requireRole
       return res.json({ draft: false, reason: `graph-${resp.status}`, code: j.error?.code || '', detail: String(j.error?.message || '').slice(0, 200) });
     }
     await pool.query("UPDATE prepprod_ddl SET status='EN_VALIDATION' WHERE id=$1", [req.params.id]);
-    await logActivity(req, 'DDL_SEND_VALIDATION', req.params.id, `Brouillon de validation créé pour le lot ${row.lot} (PRRC ${DDL_PRRC_EMAIL}, PDF joint)`);
+    await logActivity(req, 'DDL_SEND_VALIDATION', req.params.id, `Brouillon de validation créé pour le lot ${row.lot} (PRRC ${DDL_PRRC_EMAIL}, copie ${MAIL_CC_EMAIL}, Word joint)`);
     broadcast('ddl:changed', {});
     res.json({ draft: true, webLink: j.webLink || null, to: DDL_PRRC_EMAIL });
   } catch (e: any) { console.error('ddl send-validation', e); res.status(500).json({ error: 'Erreur serveur' }); }
@@ -5461,7 +6862,15 @@ app.post('/api/prepprod/ddl/:id/send-validation', authenticateToken, requireRole
 app.post('/api/pl/email-draft', authenticateToken, requireView('pl'), async (req: AuthRequest, res: Response) => {
   try {
     if (!graphConfigured()) return res.json({ draft: false, reason: 'graph-off' });
-    const { subject, bodyHtml, attachments } = req.body || {};
+    const { subject, bodyHtml, attachments, clientName } = req.body || {};
+    // Le brouillon part au client RÉELLEMENT facturé : on prend l'adresse de sa fiche.
+    // Sans adresse renseignée, on retombe sur les destinataires par défaut (PL_MAIL_TO).
+    let destinataires = PL_MAIL_TO;
+    if (clientName) {
+      const c = await pool.query('SELECT email FROM pl_clients WHERE name = $1', [String(clientName)]);
+      const mails = String(c.rows[0]?.email || '').split(/[,;]/).map(x => x.trim()).filter(Boolean);
+      if (mails.length) destinataires = mails.map(address => ({ emailAddress: { address } }));
+    }
     const atts = (Array.isArray(attachments) ? attachments : []).filter((a: any) => a && a.contentBytes).slice(0, 6).map((a: any) => ({
       '@odata.type': '#microsoft.graph.fileAttachment',
       name: String(a.name || 'document.pdf').slice(0, 120),
@@ -5471,6 +6880,8 @@ app.post('/api/pl/email-draft', authenticateToken, requireView('pl'), async (req
     const draftPayload = JSON.stringify({
       subject: String(subject || 'Goods Ready for Collection').slice(0, 300),
       body: { contentType: 'HTML', content: String(bodyHtml || '') },
+      toRecipients: destinataires,
+      ccRecipients: MAIL_CC,
       attachments: atts,
     });
     const postDraft = (tok: string) => fetch(`${GRAPH}/users/${encodeURIComponent(DDL_MAIL_FROM)}/messages`, {
@@ -5495,6 +6906,7 @@ function buildValidationEml(to: string, subject: string, body: string, filename:
   const lines = [
     'X-Unsent: 1',
     `To: ${to}`,
+    `Cc: ${MAIL_CC_EMAIL}`,
     `Subject: ${encSubj}`,
     `Date: ${new Date().toUTCString()}`,
     'MIME-Version: 1.0',
@@ -5506,7 +6918,7 @@ function buildValidationEml(to: string, subject: string, body: string, filename:
     '',
     wrap(Buffer.from(body, 'utf8').toString('base64')),
     `--${boundary}`,
-    `Content-Type: application/pdf; name="${safeName}"`,
+    `Content-Type: ${ddlAttMime(pdf)}; name="${safeName}"`,
     'Content-Transfer-Encoding: base64',
     `Content-Disposition: attachment; filename="${safeName}"`,
     '',
@@ -5525,10 +6937,10 @@ app.get('/api/prepprod/ddl/:id/email-eml', authenticateToken, requireView('prepp
     if (!row || !row.pdf) return res.status(404).json({ error: 'PDF introuvable' });
     const subject = `Validation DDL – lot ${row.lot}${row.ddl_number ? ` (${row.ddl_number} v${row.ddl_version || '—'})` : ''}`;
     const body =
-      `Bonjour Farid,\n\nMerci de valider le DDL du lot ${row.lot} (PDF en pièce jointe).\n` +
+      `Bonjour Farid,\n\nMerci de valider le DDL du lot ${row.lot} (fichier Word en pièce jointe).\n` +
       `- Modèle : ${row.ddl_number || row.template_name || '—'} · version ${row.ddl_version || '—'}${row.application_date ? ` · date d'application ${row.application_date}` : ''}\n` +
       `- Type de produit : ${row.family || '—'}\n\nMerci !`;
-    const filename = row.pdf_filename || `DDL_${row.lot}.pdf`;
+    const filename = ddlAttName(row.pdf_filename, row.lot, row.pdf);
     const eml = buildValidationEml(DDL_PRRC_EMAIL, subject, body, filename, Buffer.from(row.pdf));
     res.setHeader('Content-Type', 'message/rfc822');
     res.setHeader('Content-Disposition', `attachment; filename="Validation_DDL_${String(row.lot).replace(/[^A-Za-z0-9_-]/g, '')}.eml"`);
@@ -5543,8 +6955,9 @@ app.post('/api/prepprod/ddl/send-validation-bulk', authenticateToken, requireRol
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x: any) => parseInt(x, 10)).filter((x: number) => !isNaN(x)) : [];
     if (!ids.length) return res.status(400).json({ error: 'Aucun lot sélectionné' });
     const r = await pool.query('SELECT id, lot, family, template_name, ddl_number, ddl_version, application_date, pdf_filename, pdf FROM prepprod_ddl WHERE id = ANY($1) ORDER BY lot', [ids]);
-    const rows = r.rows.filter((x: any) => x.pdf);
-    if (!rows.length) return res.status(404).json({ error: 'Aucun PDF trouvé pour la sélection' });
+    const rows = r.rows.filter((x: any) => x.pdf && ddlIsWord(x.pdf));
+    const oldFormat = r.rows.filter((x: any) => x.pdf && !ddlIsWord(x.pdf)).map((x: any) => x.lot);
+    if (!rows.length) return res.status(409).json({ error: oldFormat.length ? `Ces dossiers de lot ont été générés à l'ancien format PDF (${oldFormat.join(', ')}). Regénérez-les pour obtenir les fichiers Word.` : 'Aucun dossier de lot trouvé pour la sélection' });
     const lots = rows.map((x: any) => x.lot);
     const subject = `Validation DDL – ${rows.length > 1 ? `${rows.length} lots` : `lot ${lots[0]}`} : ${lots.join(', ')}`;
     // Dates de début de fabrication (onglet Tracking Production) par lot → échéance de validation 5 j ouvrés avant.
@@ -5553,9 +6966,22 @@ app.post('/api/prepprod/ddl/send-validation-bulk', authenticateToken, requireRol
       const bq = await pool.query('SELECT id, startdate FROM batches WHERE UPPER(id) = ANY($1)', [lots.map((l: any) => String(l).toUpperCase())]);
       for (const b of bq.rows) if (b.startdate) startMap[String(b.id).toUpperCase()] = b.startdate;
     } catch { /* best-effort */ }
+    // Phases HAR : la formulation de la même famille donne les dates de référence.
+    // (Priorité au DDL de formulation présent dans l'envoi ; sinon, on va le chercher en base.)
+    const refFamille: Record<string, string> = {};
+    for (const x of rows) {
+      const sd = startMap[String(x.lot).toUpperCase()];
+      if (sd && ddlEstFormulation(x) && x.family) refFamille[x.family] = sd;
+    }
+    for (const x of rows) {
+      if (ddlEstPhase(x) && x.family && !refFamille[x.family]) {
+        const d = await ddlDateFormulationFamille(x.family);
+        if (d) refFamille[x.family] = d;
+      }
+    }
     const td = 'border:1px solid #cbd5e1;padding:6px 10px;text-align:left';
     const trs = rows.map((x: any) => {
-      const sd = startMap[String(x.lot).toUpperCase()] || null;
+      const sd = (ddlEstPhase(x) && x.family && refFamille[x.family]) || startMap[String(x.lot).toUpperCase()] || null;
       const vb = sd ? subBusinessDaysIso(sd, 5) : null;
       return `<tr><td style="${td}">${x.lot}</td><td style="${td}">${x.family || '—'}</td><td style="${td}">${x.ddl_number || x.template_name || '—'} v${x.ddl_version || '—'}</td><td style="${td}">${sd ? fmtFrDate(sd) : 'à confirmer'}</td><td style="${td}"><b>${vb ? fmtFrDate(vb) : '—'}</b></td></tr>`;
     }).join('');
@@ -5569,15 +6995,15 @@ app.post('/api/prepprod/ddl/send-validation-bulk', authenticateToken, requireRol
     <tbody>${trs}</tbody>
   </table>
   <p>Merci de me confirmer la <b>validation et l'impression</b>, ou de me signaler toute correction nécessaire.</p>
-  <p style="margin-top:16px">Bien cordialement,<br><b>Abdel HADJAB</b><br>Operation Director<br>Louna Aesthetics SAS</p>
+  ${MAIL_SIGNATURE_HTML}
 </div>`;
     const attachments = rows.map((x: any) => ({
       '@odata.type': '#microsoft.graph.fileAttachment',
-      name: x.pdf_filename || `DDL_${x.lot}.docx`,
-      contentType: ddlAttMime(x.pdf_filename),
+      name: ddlAttName(x.pdf_filename, x.lot, x.pdf),
+      contentType: ddlAttMime(x.pdf),
       contentBytes: Buffer.from(x.pdf).toString('base64'),
     }));
-    const payload = JSON.stringify({ subject, body: { contentType: 'HTML', content }, toRecipients: [{ emailAddress: { address: DDL_PRRC_EMAIL } }], attachments });
+    const payload = JSON.stringify({ subject, body: { contentType: 'HTML', content }, toRecipients: [{ emailAddress: { address: DDL_PRRC_EMAIL } }], ccRecipients: MAIL_CC, attachments });
     const postDraft = (tok: string) => fetch(`${GRAPH}/users/${encodeURIComponent(DDL_MAIL_FROM)}/messages`, {
       method: 'POST', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body: payload,
     });
@@ -5885,12 +7311,32 @@ async function qmsSourceFileUrl(name: string): Promise<string | null> {
   } catch { return null; }
 }
 
-const QMS_SUPPLIER_FILE = process.env.QMS_SUPPLIER_FILE_NAME || 'Supplier Tracking List_260617.xlsx';
+// Dossier SharePoint des fournisseurs. Le fichier y est RENOMMÉ à chaque mise à jour (suffixe date :
+// « Supplier Tracking List_260812.xlsx »), on ne peut donc pas figer son nom. On liste le dossier et on
+// prend le .xlsx le plus récent posé DIRECTEMENT dedans — les copies périmées sont dans des sous-dossiers
+// (_Archive_, annexes CAPA/Change), qui ne sont pas parcourus : aucun risque de reprendre une archive.
+const QMS_SUPPLIER_FOLDER_PATH = process.env.QMS_SUPPLIER_FOLDER_PATH
+  || 'General/02_ASSURANCE QUALITÉ/09 - Purchase/05 - Records/04-SUPPLIERS';
+// Dernier fichier retenu (affiché dans l'écran Fournisseurs pour contrôler la fraîcheur).
+let _supplierFile: { name: string; modified: string } | null = null;
+async function qmsSupplierFile(): Promise<{ id: string; name: string; modified: string }> {
+  const driveId = process.env.GRAPH_DRIVE_ID as string;
+  const enc = QMS_SUPPLIER_FOLDER_PATH.split('/').map(encodeURIComponent).join('/');
+  const j = await graphGet(`${GRAPH}/drives/${driveId}/root:/${enc}:/children?$select=id,name,file,lastModifiedDateTime&$top=200`);
+  const cands = (j.value || []).filter((x: any) =>
+    x.file && /\.xlsx?m?$/i.test(String(x.name || '')) && /supplier\s*tracking\s*list/i.test(String(x.name || '')));
+  if (!cands.length) throw new Error(`Aucun fichier « Supplier Tracking List….xlsx » dans ${QMS_SUPPLIER_FOLDER_PATH}`);
+  cands.sort((a: any, b: any) => String(b.lastModifiedDateTime).localeCompare(String(a.lastModifiedDateTime)));
+  const f = cands[0];
+  _supplierFile = { name: f.name, modified: String(f.lastModifiedDateTime || '').slice(0, 10) };
+  return { id: f.id, ..._supplierFile };
+}
 
 // Fournisseurs : onglet « Supplier Tracking List », en-tête ligne 17 (index 16), données dès l'index 17.
 async function qmsRefreshSuppliers(): Promise<number> {
   const mod: any = await import('xlsx'); const XLSX = mod.default ?? mod;
-  const buf = await qmsSourceFileBuffer(QMS_SUPPLIER_FILE);
+  const src = await qmsSupplierFile();
+  const buf = await graphDownloadById(src.id);
   const wb = XLSX.read(buf, { type: 'buffer' });
   const ws = wb.Sheets['Supplier Tracking List'];
   if (!ws) throw new Error('Onglet « Supplier Tracking List » introuvable');
@@ -6129,6 +7575,101 @@ async function qmsRenewSubscriptions() {
     await pool.query(`INSERT INTO qms_subscriptions (id, resource, expires) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET expires=EXCLUDED.expires`, [j.id, resource, exp]);
     console.log('🔔 QMS subscription créée:', j.id);
   } catch (e) { console.error('QMS subscription', e); }
+}
+
+// ===================== Alertes automatiques de production =====================
+// L'application prévient au lieu d'attendre qu'on regarde l'écran.
+const ALERTES_TO = (process.env.ALERTES_PROD_TO || DDL_MAIL_FROM)
+  .split(',').map(a => a.trim()).filter(Boolean)
+  .map(address => ({ emailAddress: { address } }));
+// Jour et heure d'envoi du récapitulatif (1 = lundi par défaut, 7 h).
+const ALERTES_JOUR = Number(process.env.ALERTES_PROD_JOUR ?? 1);
+const ALERTES_HEURE = Number(process.env.ALERTES_PROD_HEURE ?? 7);
+
+async function envoyerMailInterne(sujet: string, html: string) {
+  const payload = JSON.stringify({
+    message: { subject: sujet.slice(0, 300), body: { contentType: 'HTML', content: html }, toRecipients: ALERTES_TO },
+    saveToSentItems: true,
+  });
+  const post = (tok: string) => fetch(`${GRAPH}/users/${encodeURIComponent(DDL_MAIL_FROM)}/sendMail`, {
+    method: 'POST', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body: payload,
+  });
+  let r = await post(await graphToken());
+  if (r.status === 401 || r.status === 403) r = await post(await graphToken(true));
+  if (!r.ok) throw new Error(`Graph sendMail ${r.status}: ${(await r.text()).slice(0, 200)}`);
+}
+
+// Récapitulatif construit avec les mêmes règles que le poste de pilotage « Aujourd'hui ».
+async function construireRecapProduction(): Promise<{ sujet: string; html: string; total: number }> {
+  const actifs = `cloture IS NOT TRUE AND process_stage IS DISTINCT FROM 'EXPEDIE'`;
+  const [retard, figes, bloques, prep, ddl] = await Promise.all([
+    pool.query(`SELECT id, client, enddate, responsable FROM batches WHERE ${actifs} AND enddate IS NOT NULL AND enddate < CURRENT_DATE ORDER BY enddate LIMIT 30`),
+    pool.query(`SELECT id, client, process_stage, EXTRACT(DAY FROM (CURRENT_TIMESTAMP - stage_since))::int AS jours FROM batches WHERE ${actifs} AND stage_since < CURRENT_TIMESTAMP - ($1 || ' days')::interval ORDER BY stage_since LIMIT 30`, [LOT_FIGE_JOURS]),
+    pool.query(`SELECT id, client, blocage_motif FROM batches WHERE ${actifs} AND COALESCE(blocage_motif,'') <> '' LIMIT 30`),
+    pool.query(`SELECT id, client, startdate, preptasks FROM batches WHERE ${actifs} AND startdate BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY startdate LIMIT 30`),
+    pool.query(`SELECT d.lot, d.status, b.startdate FROM prepprod_ddl d LEFT JOIN batches b ON ${LOT_KEY_SQL('b.id')} = ${LOT_KEY_SQL('d.lot')}
+                 WHERE d.status IN ('GENERE','EN_VALIDATION') AND (b.startdate IS NULL OR b.startdate <= CURRENT_DATE + 7) LIMIT 30`),
+  ]);
+  const prepIncomplet = prep.rows
+    .map((r: any) => ({ ...r, manquantes: PREP_TASK_IDS.filter(k => !(r.preptasks || {})[k]) }))
+    .filter((r: any) => r.manquantes.length);
+  const escH = (v: any) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const jour = (d: any) => d ? new Date(d).toLocaleDateString('fr-FR') : '—';
+  const section = (titre: string, lignes: string[]) => lignes.length
+    ? `<p style="margin:16px 0 4px"><b>${escH(titre)} (${lignes.length})</b></p><ul style="margin:0;padding-left:18px">${lignes.map(l => `<li>${l}</li>`).join('')}</ul>`
+    : '';
+  const html = `<div style="font-family:Aptos,Calibri,Arial,sans-serif;font-size:12pt;color:#1e293b">
+    <p>Bonjour,</p>
+    <p>Voici les points de production qui demandent une décision cette semaine.</p>
+    ${section('Fabrication en retard', retard.rows.map((r: any) => `Lot <b>${escH(r.id)}</b> — ${escH(r.client || 'client non renseigné')} — fin prévue le ${jour(r.enddate)}${r.responsable ? ` — ${escH(r.responsable)}` : ' — <i>non assigné</i>'}`))}
+    ${section(`Lots sans mouvement depuis plus de ${LOT_FIGE_JOURS} jours`, figes.rows.map((r: any) => `Lot <b>${escH(r.id)}</b> — ${escH(r.client || '—')} — étape ${escH(r.process_stage)} depuis ${r.jours} jours`))}
+    ${section('Lots déclarés bloqués', bloques.rows.map((r: any) => `Lot <b>${escH(r.id)}</b> — ${escH(r.blocage_motif)}`))}
+    ${section('Préparation incomplète à moins de 7 jours de la production', prepIncomplet.map((r: any) => `Lot <b>${escH(r.id)}</b> — production le ${jour(r.startdate)} — il manque : ${escH(r.manquantes.join(', '))}`))}
+    ${section('Dossiers de lot pas encore validés', ddl.rows.map((r: any) => `Lot <b>${escH(r.lot)}</b> — ${r.status === 'EN_VALIDATION' ? 'en attente de validation' : 'généré, pas encore envoyé'}${r.startdate ? ` — production le ${jour(r.startdate)}` : ''}`))}
+    <p style="margin-top:16px">Le détail est dans l'onglet « Aujourd'hui » de LounaFlow.</p>
+    ${MAIL_SIGNATURE_HTML}
+  </div>`;
+  const total = (retard.rowCount || 0) + (figes.rowCount || 0) + (bloques.rowCount || 0) + prepIncomplet.length + (ddl.rowCount || 0);
+  return { sujet: `LounaFlow — points de production à traiter (${total})`, html, total };
+}
+
+async function envoyerRecapProduction(origine: string) {
+  try {
+    const { sujet, html, total } = await construireRecapProduction();
+    if (!total) { console.log(`📋 Alertes production (${origine}) : rien à signaler, pas d'e-mail envoyé.`); return; }
+    await envoyerMailInterne(sujet, html);
+    console.log(`📋 Alertes production (${origine}) : récapitulatif envoyé (${total} point(s)).`);
+  } catch (e) { console.error('alertes production', e); }
+}
+
+// Aperçu et envoi immédiat, pour tester sans attendre le lundi.
+app.get('/api/pilotage/recap', authenticateToken, async (_req: AuthRequest, res: Response) => {
+  try { res.json(await construireRecapProduction()); }
+  catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+app.post('/api/pilotage/recap/envoyer', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!graphConfigured()) return res.status(503).json({ error: 'Messagerie non configurée sur ce serveur.' });
+    const { sujet, html, total } = await construireRecapProduction();
+    await envoyerMailInterne(sujet, html);
+    await logActivity(req, 'PILOTAGE_RECAP_SEND', null, `A envoyé le récapitulatif de production (${total} point(s))`);
+    res.json({ ok: true, total });
+  } catch (e: any) { console.error(e); res.status(500).json({ error: e?.message || 'Envoi impossible' }); }
+});
+
+function startAlertesProductionScheduler() {
+  if (!graphConfigured()) { console.log('ℹ️  Alertes production : Microsoft Graph non configuré — envoi désactivé.'); return; }
+  console.log(`📋 Alertes production : récapitulatif hebdomadaire (jour ${ALERTES_JOUR}, ${ALERTES_HEURE} h).`);
+  let dernierEnvoi = '';
+  // Contrôle toutes les 30 min : un seul envoi le jour et l'heure prévus.
+  setInterval(() => {
+    const m = new Date();
+    const cle = `${m.getFullYear()}-${m.getMonth()}-${m.getDate()}`;
+    if (m.getDay() === ALERTES_JOUR && m.getHours() >= ALERTES_HEURE && dernierEnvoi !== cle) {
+      dernierEnvoi = cle;
+      envoyerRecapProduction('hebdomadaire');
+    }
+  }, 30 * 60 * 1000);
 }
 
 function startQmsScheduler() {
@@ -6779,6 +8320,28 @@ app.get('/api/qms/suppliers', authenticateToken, requireView('qms'), async (req:
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
+// Fichier source retenu + date de la dernière synchro réussie (bandeau de fraîcheur de l'écran Fournisseurs).
+app.get('/api/qms/suppliers/source', authenticateToken, requireView('qms'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await pool.query(`SELECT to_char(MAX(imported_at),'YYYY-MM-DD HH24:MI') AS last FROM qms_suppliers`);
+    res.json({ file: _supplierFile, importedAt: r.rows[0]?.last || null });
+  } catch (e) { console.error('suppliers source', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+// Forcer la resynchronisation depuis SharePoint (relit le fichier le plus récent du dossier fournisseurs).
+app.post('/api/qms/suppliers/sync', authenticateToken, requireRole('editor'), async (req: AuthRequest, res: Response) => {
+  if (!graphConfigured()) return res.status(503).json({ error: 'Connexion SharePoint non configurée sur ce serveur (fonctionne en production).' });
+  try {
+    const n = await qmsRefreshSuppliers();
+    await logActivity(req, 'QMS_SUPPLIERS_SYNC', null, `Resynchronisation fournisseurs (${n} ligne(s)) depuis ${_supplierFile?.name || 'SharePoint'}`);
+    broadcast('qms:changed', {});
+    res.json({ success: true, imported: n, file: _supplierFile });
+  } catch (e: any) {
+    console.error('suppliers sync', e);
+    res.status(502).json({ error: 'Synchronisation impossible : ' + String(e?.message || e).slice(0, 160) });
+  }
+});
+
 app.post('/api/qms/suppliers/import', authenticateToken, requireRole('admin'), async (req: AuthRequest, res: Response) => {
   try {
     const recs: any[] = Array.isArray(req.body?.records) ? req.body.records : [];
@@ -6825,6 +8388,113 @@ app.get('/api/qms/specs', authenticateToken, requireView('qms'), async (_req: Au
   } catch (e) { console.error(e); res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
+// ===================== Accueil & Emails (repris de Louna OS) =====================
+// Réservés au propriétaire des boîtes mail (voir requireOwner).
+registerMailRoutes({ app, pool, authenticateToken, requireOwner });
+
+// Petit cache mémoire (10 min) : évite de marteler Odoo à chaque ouverture de l'accueil.
+const accueilCache = new Map<string, { at: number; data: any }>();
+async function accueilCached(key: string, ttlMs: number, fn: () => Promise<any>): Promise<any> {
+  const c = accueilCache.get(key);
+  if (c && Date.now() - c.at < ttlMs) return c.data;
+  try { const data = await fn(); accueilCache.set(key, { at: Date.now(), data }); return data; }
+  catch (e) { if (c) return c.data; throw e; }
+}
+
+// Réalisé de ventes = factures clients postées dans Odoo, mois par mois (2 sociétés).
+async function realiseMensuel(year: number): Promise<number[]> {
+  return accueilCached('realise:' + year, 10 * 60000, async () => {
+    const now = new Date();
+    const dernierMois = year < now.getFullYear() ? 12 : now.getMonth() + 1;
+    const totalMois = async (company: string, debut: string, fin: string) => {
+      const cid = await odooCompanyId(company);
+      const domain: any[] = [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'], ['invoice_date', '>=', debut], ['invoice_date', '<', fin]];
+      if (cid) domain.push(['company_id', '=', cid]);
+      const grp = await odooKw('account.move', 'read_group', [domain, ['amount_untaxed:sum'], []], {});
+      return (grp && grp[0]?.amount_untaxed) || 0;
+    };
+    const res = await Promise.all(Array.from({ length: dernierMois }, async (_, i) => {
+      const debut = `${year}-${String(i + 1).padStart(2, '0')}-01`;
+      const fin = i === 11 ? `${year + 1}-01-01` : `${year}-${String(i + 2).padStart(2, '0')}-01`;
+      const [a, r] = await Promise.all([
+        totalMois('aesthetics', debut, fin).catch(() => 0),
+        totalMois('regenerative', debut, fin).catch(() => 0),
+      ]);
+      return Math.round(a + r);
+    }));
+    const out = Array(12).fill(0);
+    res.forEach((v, i) => out[i] = v);
+    return out;
+  });
+}
+
+// Commandes fournisseurs à relancer : en retard, ou échéance dans les 14 jours.
+async function commandesARelancer(): Promise<any[]> {
+  return accueilCached('po', 10 * 60000, async () => {
+    const cid = await odooCompanyId('aesthetics');
+    const domain: any[] = [['state', '=', 'purchase'], ['receipt_status', 'in', ['pending', 'partial']]];
+    if (cid) domain.push(['company_id', '=', cid]);
+    const rows = await odooKw('purchase.order', 'search_read', [domain], {
+      fields: ['name', 'partner_id', 'date_planned', 'amount_total'],
+      limit: 300, order: 'date_planned asc',
+    });
+    const today = new Date().toISOString().slice(0, 10);
+    const limite = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+    return (rows || []).map((o: any) => ({
+      id: o.id,
+      name: o.name,
+      partner: Array.isArray(o.partner_id) ? o.partner_id[1] : '',
+      datePlanned: o.date_planned ? String(o.date_planned).slice(0, 10) : null,
+      amount: o.amount_total || 0,
+      etat: o.date_planned && String(o.date_planned).slice(0, 10) < today ? 'RETARD'
+        : (o.date_planned && String(o.date_planned).slice(0, 10) <= limite ? 'BIENTOT' : 'OK'),
+    })).filter((o: any) => o.etat !== 'OK')
+      .sort((a: any, b: any) => (a.datePlanned || '9999').localeCompare(b.datePlanned || '9999'));
+  });
+}
+
+// Données de l'onglet Accueil (cockpit personnel)
+app.get('/api/accueil', authenticateToken, requireOwner, async (_req: AuthRequest, res: Response) => {
+  try {
+    const year = new Date().getFullYear();
+    const [lots, qms, suppliers, urgent, fc] = await Promise.all([
+      pool.query(`SELECT id, reference, client, product, process_stage, quality_status, status, progress, deliveryDate, startDate
+                  FROM batches WHERE process_stage <> 'EXPEDIE' AND status <> 'COMPLETED'
+                  ORDER BY deliveryDate ASC NULLS LAST LIMIT 40`),
+      pool.query(`SELECT kind, ext_id, description, status, due_date, ref, web_url FROM qms_tracking
+                  WHERE UPPER(status) IN ('OPEN','OUVERTE','EN_COURS','EN COURS') ORDER BY due_date ASC NULLS LAST LIMIT 60`),
+      pool.query(`SELECT name, classification, cert_ref, cert_expiration, status FROM qms_suppliers
+                  WHERE cert_expiration IS NOT NULL AND cert_expiration <= (CURRENT_DATE + INTERVAL '120 days')
+                  ORDER BY cert_expiration ASC LIMIT 25`),
+      emailsUrgents(pool),
+      // « archived » = année figée en lecture seule, pas année annulée : ses chiffres restent le prévisionnel de l'année.
+      pool.query(`SELECT prix_unitaire, qty FROM ventes_forecast WHERE year=$1 AND retire=FALSE`, [year]),
+    ]);
+    // Prévisionnel : somme (quantité du mois × prix unitaire) sur toutes les lignes actives
+    const previsionnel = (() => {
+      const m = Array(12).fill(0);
+      for (const r of fc.rows) {
+        const q = Array.isArray(r.qty) ? r.qty : JSON.parse(r.qty || '[]');
+        q.forEach((v: number, i: number) => { m[i] += (Number(v) || 0) * (Number(r.prix_unitaire) || 0); });
+      }
+      return m.map(v => Math.round(v));
+    })();
+    const [realise, commandes] = await Promise.all([
+      realiseMensuel(year).catch(() => Array(12).fill(0)),
+      commandesARelancer().catch(() => []),
+    ]);
+    const parKind = (k: string) => qms.rows.filter((x: any) => x.kind === k);
+    res.json({
+      lots: lots.rows,
+      nc: parKind('NC'), capa: parKind('CAPA'), cc: parKind('CC'),
+      fournisseurs: suppliers.rows,
+      emailsUrgents: urgent,
+      commandes,
+      forecast: { year, previsionnel, realise },
+    });
+  } catch (e: any) { console.error('accueil', e); res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
 if (isProduction) {
   app.get('*', (req: Request, res: Response) => {
     const indexPath = path.join(__dirname, 'dist', 'index.html');
@@ -6837,6 +8507,7 @@ const PORT = process.env.PORT || 3001;
 async function startServer() {
   try {
     await initDatabase();
+    await initMailTables(pool);
 
     httpServer.listen(PORT, () => {
       console.log(`🚀 Serveur LounaFlow v2 démarré sur http://localhost:${PORT}`);
@@ -6844,6 +8515,8 @@ async function startServer() {
       console.log(`👥 Rôles disponibles: admin, editor, viewer`);
       console.log(`🔑 Pour vous connecter: admin / louna2026 (par défaut)`);
       startQmsScheduler();
+      startAlertesProductionScheduler();
+      startMailScheduler();
     });
   } catch (error) {
     console.error('❌ Erreur au démarrage:', error);

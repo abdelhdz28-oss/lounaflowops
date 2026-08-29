@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { LayoutDashboard, KanbanSquare, ClipboardCheck, FolderKanban, Boxes, FileCheck, ChevronDown, TrendingUp, BarChart3, TestTube2, Database, Truck, Settings, Activity, Users, Shield, FolderCheck, Gauge, PackageCheck, Eye, PackageSearch } from 'lucide-react';
+import { LayoutDashboard, KanbanSquare, ClipboardCheck, FolderKanban, Boxes, FileCheck, ChevronDown, TrendingUp, BarChart3, TestTube2, Database, Truck, Settings, Activity, Users, Shield, FolderCheck, Gauge, PackageCheck, Eye, PackageSearch, Home, Mail, X } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useAuth } from '../AuthContext';
 
@@ -7,11 +7,17 @@ interface SidebarProps {
   currentView: string;
   onChangeView: (view: string) => void;
   isAdmin: boolean;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
 }
 
-// adminOnly : réservé admin. Les autres onglets sont attribuables par utilisateur.
+// adminOnly : réservé admin. ownerOnly : onglets personnels d'Abdel (Accueil, Emails),
+// invisibles pour tous les autres comptes, y compris les administrateurs.
 // children : sous-menus (l'accès est géré par la permission du parent).
 const navItems: any[] = [
+  { id: 'accueil', label: 'Accueil', icon: Home, adminOnly: false, ownerOnly: true },
+  { id: 'emails', label: 'Emails', icon: Mail, adminOnly: false, ownerOnly: true },
+  { id: 'pilotage', label: "Aujourd'hui", icon: Gauge, adminOnly: false },
   { id: 'dashboard', label: 'Tracking Production', icon: LayoutDashboard, adminOnly: false },
   { id: 'kanban', label: 'Tracking Kanban', icon: KanbanSquare, adminOnly: false },
   {
@@ -63,10 +69,10 @@ const navItems: any[] = [
   { id: 'settings', label: 'Paramètres', icon: Settings, adminOnly: false },
 ];
 
-export function Sidebar({ currentView, onChangeView, isAdmin }: SidebarProps) {
-  const { hasView } = useAuth();
+export function Sidebar({ currentView, onChangeView, isAdmin, mobileOpen = false, onCloseMobile }: SidebarProps) {
+  const { hasView, isOwner } = useAuth();
   const [open, setOpen] = useState<Set<string>>(new Set(currentView.startsWith('coa') ? ['coa'] : currentView.startsWith('qms') ? ['qms'] : currentView.startsWith('prepprod') ? ['prepprod'] : currentView.startsWith('cockpit') ? ['cockpit'] : []));
-  const visibleItems = navItems.filter(item => item.adminOnly ? isAdmin : hasView(item.id));
+  const visibleItems = navItems.filter(item => item.ownerOnly ? isOwner : item.adminOnly ? isAdmin : hasView(item.id));
 
   const itemCls = (active: boolean) => cn(
     'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
@@ -74,10 +80,16 @@ export function Sidebar({ currentView, onChangeView, isAdmin }: SidebarProps) {
   );
 
   return (
-    <aside className="w-64 bg-white border-r border-slate-200 flex flex-col py-6 px-4 shrink-0 overflow-y-auto">
-      <div className="flex items-center gap-2 text-blue-600 font-bold text-xl mb-8 px-2">
-        <Activity className="w-6 h-6" />
-        <span>LounaFlow</span>
+    <aside className={cn(
+      'w-64 bg-white border-r border-slate-200 flex flex-col py-6 px-4 shrink-0 overflow-y-auto',
+      'fixed inset-y-0 left-0 z-40 transition-transform duration-200 lg:static lg:translate-x-0 lg:shadow-none',
+      mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
+    )}>
+      <div className="flex items-center justify-between gap-2 text-blue-600 font-bold text-xl mb-8 px-2">
+        <span className="flex items-center gap-2"><Activity className="w-6 h-6" /> LounaFlow</span>
+        <button onClick={onCloseMobile} aria-label="Fermer le menu" className="lg:hidden p-1 rounded-md text-slate-400 hover:bg-slate-100">
+          <X className="w-5 h-5" />
+        </button>
       </div>
       <nav className="flex flex-col gap-1">
         {visibleItems.map((item) => {

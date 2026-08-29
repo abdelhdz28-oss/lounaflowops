@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../AuthContext';
-import { Loader2, Search, ExternalLink, AlertTriangle } from 'lucide-react';
+import { Loader2, Search, ExternalLink, AlertTriangle, RefreshCw } from 'lucide-react';
 import { useSort, SortTh } from '../utils/useSort';
 import { fmtDate } from '../utils/format';
 
@@ -15,8 +15,11 @@ const CAT_LABEL: Record<string, string> = { MP: 'Matière première', AC: 'Artic
 const expirySoon = (iso: string | null) => { if (!iso) return false; const d = new Date(iso); if (isNaN(d.getTime())) return false; return d.getTime() < Date.now() + 90 * 864e5; };
 
 export function QmsFournisseursView() {
-  const { token, socket } = useAuth();
+  const { token, socket, canEdit } = useAuth();
   const [tab, setTab] = useState<'sup' | 'spec'>('sup');
+  const [source, setSource] = useState<{ file: { name: string; modified: string } | null; importedAt: string | null } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
   const [sup, setSup] = useState<any[]>([]);
   const [specs, setSpecs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,12 +31,25 @@ export function QmsFournisseursView() {
   const authFetch = useCallback((url: string) => fetch(`${API_URL}${url}`, { headers: { Authorization: `Bearer ${token}` } }), [token]);
   const load = useCallback(async () => {
     try {
-      const [s, sp] = await Promise.all([authFetch('/api/qms/suppliers'), authFetch('/api/qms/specs')]);
+      const [s, sp, src] = await Promise.all([authFetch('/api/qms/suppliers'), authFetch('/api/qms/specs'), authFetch('/api/qms/suppliers/source')]);
       if (s.ok) setSup(await s.json());
       if (sp.ok) setSpecs(await sp.json());
+      if (src.ok) setSource(await src.json());
     } finally { setLoading(false); }
   }, [authFetch]);
   useEffect(() => { load(); }, [load]);
+
+  // Force la relecture du fichier fournisseurs le plus récent déposé sur SharePoint.
+  const runSync = async () => {
+    setSyncing(true); setSyncMsg('');
+    try {
+      const r = await fetch(`${API_URL}/api/qms/suppliers/sync`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json().catch(() => ({}));
+      setSyncMsg(r.ok ? `${d.imported} fournisseur(s) mis à jour depuis ${d.file?.name || 'SharePoint'}.` : (d.error || 'Synchronisation impossible.'));
+      if (r.ok) await load();
+    } catch { setSyncMsg('Synchronisation impossible.'); }
+    finally { setSyncing(false); }
+  };
   useEffect(() => { if (!socket) return; const h = () => load(); socket.on('qms:changed', h); return () => { socket.off('qms:changed', h); }; }, [socket, load]);
 
   const supFiltered = sup.filter((x) => (!status || x.status === status) && (!cls || x.classification === cls) && (!q || `${x.name} ${x.extId} ${x.product}`.toLowerCase().includes(q.toLowerCase())));
@@ -49,7 +65,21 @@ export function QmsFournisseursView() {
       <div className="flex items-center gap-2 mb-5">
         <button onClick={() => setTab('sup')} className={`px-4 py-2 rounded-lg text-sm font-medium ${tab === 'sup' ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>Fournisseurs <span className="opacity-70">({sup.length})</span></button>
         <button onClick={() => setTab('spec')} className={`px-4 py-2 rounded-lg text-sm font-medium ${tab === 'spec' ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>Spécifications <span className="opacity-70">({specs.length})</span></button>
+        {tab === 'sup' && canEdit && (
+          <button onClick={runSync} disabled={syncing} className="ml-auto inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />{syncing ? 'Synchronisation…' : 'Resynchroniser'}
+          </button>
+        )}
       </div>
+
+      {tab === 'sup' && (
+        <div className="mb-4 text-sm text-slate-500">
+          {source?.file
+            ? <>Source : <span className="font-medium text-slate-700">{source.file.name}</span> · fichier du {fmtDate(source.file.modified)}{source.importedAt ? ` · importé le ${source.importedAt}` : ''}</>
+            : <>Fichier source lu automatiquement dans le dossier fournisseurs SharePoint{source?.importedAt ? ` · dernier import le ${source.importedAt}` : ''}</>}
+          {syncMsg && <span className="ml-2 text-slate-700">— {syncMsg}</span>}
+        </div>
+      )}
 
       {tab === 'sup' && (
         <div className="grid grid-cols-4 gap-4 mb-5">

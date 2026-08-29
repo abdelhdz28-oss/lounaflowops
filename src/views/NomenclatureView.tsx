@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
-import { Loader2, RefreshCw, ChevronUp, ChevronDown, FlaskConical } from 'lucide-react';
+import { Loader2, RefreshCw, ChevronUp, ChevronDown, FlaskConical, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 const fmtQty = (n: number) => (n || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 });
@@ -131,6 +132,41 @@ export function NomenclatureView() {
   const groups: Record<string, BomLine[]> = {};
   for (const l of bom?.lines || []) (groups[catOf(l)] ||= []).push(l);
 
+  // Export Excel de la nomenclature affichée (avec les quantités recalculées).
+  const exportExcel = () => {
+    if (!bom || !tree) return;
+    const arrondi = (n: number) => Math.round(n * 10000) / 10000;
+    const qteDemandee = !isNaN(desiredNum) ? desiredNum : bom.productQty;
+    const rows: any[][] = [
+      ['Nomenclature Odoo'],
+      ['Produit', `${tree.product.code} — ${tree.product.name}`],
+      ['Nomenclature', bomLabel(bom)],
+      ['Lot de référence Odoo', bom.productQty, bom.uom],
+      ['Quantité demandée', qteDemandee, mode === 'box' ? 'boîtes' : 'unités'],
+      ['Exporté le', new Date().toLocaleString('fr-FR')],
+      [],
+      ['Catégorie', 'Code', 'Désignation', 'Qté Odoo', 'Unité', 'Qté calculée'],
+    ];
+    CAT_ORDER.filter(cat => groups[cat]?.length).forEach(cat => {
+      groups[cat].forEach(l => {
+        rows.push([cat, l.code || '', l.name, arrondi(l.qty), l.uom, arrondi(l.qty * factor)]);
+        // Détail de la formule matières sous chaque vrac : les quantités suivent le vrac recalculé.
+        if (l.child) {
+          const fEnfant = l.child.productQty > 0 ? (l.qty * factor) / l.child.productQty : 0;
+          l.child.lines.forEach(c => {
+            rows.push([`${cat} ▸ ${l.name}`, c.code || '', c.name, arrondi(c.qty), c.uom, arrondi(c.qty * fEnfant)]);
+          });
+        }
+      });
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 32 }, { wch: 16 }, { wch: 48 }, { wch: 12 }, { wch: 14 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Nomenclature');
+    const nom = `Nomenclature_${tree.product.code}_${qteDemandee}${mode === 'box' ? 'boites' : 'unites'}`.replace(/[^\w.-]+/g, '_');
+    XLSX.writeFile(wb, `${nom}.xlsx`);
+  };
+
   return (
     <div className="space-y-6">
       {/* Sélection produit + taille + quantité */}
@@ -174,16 +210,23 @@ export function NomenclatureView() {
             </div>
           )}
           {tmpl && (
-            <button onClick={() => loadTree(tmpl)} className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 bg-white rounded-lg text-sm font-medium hover:bg-slate-50">
-              <RefreshCw className={cn('w-4 h-4', treeLoading && 'animate-spin')} /> Rafraîchir
-            </button>
+            <div className="ml-auto flex items-center gap-2">
+              {bom && (
+                <button onClick={exportExcel} className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 bg-white rounded-lg text-sm font-medium hover:bg-slate-50">
+                  <Download className="w-4 h-4" /> Exporter Excel
+                </button>
+              )}
+              <button onClick={() => loadTree(tmpl)} className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 bg-white rounded-lg text-sm font-medium hover:bg-slate-50">
+                <RefreshCw className={cn('w-4 h-4', treeLoading && 'animate-spin')} /> Rafraîchir
+              </button>
+            </div>
           )}
         </div>
         {prodError && <div className="text-sm text-red-600">{prodError}</div>}
         <div className="text-xs text-slate-400">Données lues en direct depuis Odoo (Fabrication ▸ Nomenclatures).</div>
       </div>
 
-      {treeLoading && <div className="p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Lecture des nomenclatures Odoo…</div>}
+      {treeLoading && <div className="p-4 sm:p-6 lg:p-8 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Lecture des nomenclatures Odoo…</div>}
       {treeError && !treeLoading && <div className="bg-white border border-red-200 rounded-xl p-5 shadow-sm text-sm text-red-600">{treeError}</div>}
       {tree && !treeLoading && !treeError && tree.boms.length === 0 && (
         <div className="bg-white border border-amber-200 rounded-xl p-5 shadow-sm text-sm text-slate-500">Ce produit n'a pas de nomenclature dans Odoo.</div>

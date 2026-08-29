@@ -49,6 +49,10 @@ export function OpsReportingView() {
   const [board, setBoard] = useState<Board>({ projects: [], milestones: [], deliverables: [], weeklyComments: [], deadlineHistory: [], synthesisNotes: [] });
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const [historyItem, setHistoryItem] = useState<{ type: string; id: string; title: string } | null>(null);
+  // Archivage justifié d'un projet + import d'un planning
+  const [afficherArchives, setAfficherArchives] = useState(false);
+  const [archiveProjet, setArchiveProjet] = useState<any | null>(null);
+  const [importProjet, setImportProjet] = useState<any | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [trend, setTrend] = useState<any>(null);   // chiffres clés de la semaine précédente (tendance N vs N-1)
   const toggleCollapse = (id: string) => setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -304,7 +308,7 @@ ${due}
     const slips = slipsOf();
     const chronicMap: Record<string, number> = {};
     slips.forEach(h => { chronicMap[h.entityId] = (chronicMap[h.entityId] || 0) + 1; });
-    return board.projects.map((p: any) => {
+    return board.projects.filter((p: any) => !p.archived).map((p: any) => {
       const late = allItems.filter(isLate).filter(x => projectOf(x) === p.id)
         .map(x => ({ path: pathInProject(x), days: daysLate(x), deadline: x.deadline })).sort((a, b) => b.days - a.days);
       const chronic = Object.entries(chronicMap).filter(([, n]) => n >= 2)
@@ -361,7 +365,7 @@ ${due}
     }
 
     // 3. État par projet condensé : barre d'avancement + prochain jalon.
-    const projRows = board.projects.map((p: any) => {
+    const projRows = board.projects.filter((p: any) => !p.archived).map((p: any) => {
       const pms = milestones.filter(m => m.projectId === p.id);
       const pdel = deliverables.filter(d => pms.some(m => m.id === d.milestoneId));
       const items = [...pms, ...pdel];
@@ -420,7 +424,7 @@ ${qmsCaHtml(ctx)}
       faits = (dM > 0 || dD > 0) ? `• ${dM > 0 ? `${dM} jalon(s)` : ''}${dM > 0 && dD > 0 ? ' et ' : ''}${dD > 0 ? `${dD} livrable(s)` : ''} bouclé(s) depuis la semaine dernière. 🎉` : '• Aucun jalon bouclé cette semaine — priorité aux points à arbitrer ci-dessus.'; }
     const dd = (x: any) => x.deadline ? ` (${x.deadline})` : '';
     const mark = (x: any) => isLate(x) ? ' ⚠ en retard' : '';
-    const etat = board.projects.map((p: any) => {
+    const etat = board.projects.filter((p: any) => !p.archived).map((p: any) => {
       const pms = milestones.filter(m => m.projectId === p.id && m.status !== 'complete');
       if (!pms.length) return '';
       const ms = pms.map(m => {
@@ -457,12 +461,14 @@ ${slips.length ? slips.map(h => `• ${slipDesc(h)} — ${h.oldDeadline} → ${h
 ${qmsCaText(ctx)}
 
 On garde le cap. 🚀
-Abdel`;
+
+Assistant Maya
+Agent IA travaillant avec Abdel HADJAB`;
 
     const subject = `Debrief Ops — semaine ${week}`;
     const to = 'contact@louna-aesthetics.com;developpement@louna-aesthetics.com;f.hadjab@louna-aesthetics.com;a.porcello@louna-aesthetics.com';
     // Outlook Web (boîte pro O365) : ouvre la rédaction avec destinataires + débrief pré-remplis (fiable quel que soit le réglage du Mac).
-    const url = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const url = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&cc=a.jebari@louna-aesthetics.com&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     if (w) w.location.href = url; else window.open(url, '_blank');
   };
 
@@ -539,7 +545,7 @@ Abdel`;
       </div>
 
       <div className="space-y-5">
-        {board.projects.map(project => {
+        {board.projects.filter((p: any) => afficherArchives || !p.archived).map(project => {
           const pms = milestones.filter(m => m.projectId === project.id);
           const pdel = deliverables.filter(d => pms.some(m => m.id === d.milestoneId));
           const items = [...pms, ...pdel];
@@ -563,11 +569,29 @@ Abdel`;
                 </div>
                 {canEdit && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => api('POST', '/api/ops/milestones', { projectId: project.id, title: 'Nouveau milestone' })} className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded">+ Milestone</button>
+                    {!project.archived && <>
+                      <button onClick={() => api('POST', '/api/ops/milestones', { projectId: project.id, title: 'Nouveau milestone' })} className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded">+ Milestone</button>
+                      <button onClick={() => setImportProjet(project)} title="Importer un planning Excel ou Word" className="text-xs px-2 py-1 text-slate-600 hover:bg-slate-100 rounded">Importer planning</button>
+                      <button onClick={() => setArchiveProjet(project)} title="Archiver ce projet (terminé ou annulé)" className="text-xs px-2 py-1 text-slate-600 hover:bg-slate-100 rounded">Archiver</button>
+                    </>}
+                    {project.archived && (
+                      <button onClick={() => { if (confirm(`Réactiver le projet « ${project.name} » ?`)) api('POST', `/api/ops/projects/${project.id}/reactiver`); }} className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded">Réactiver</button>
+                    )}
                     <button onClick={() => { if (confirm(`Supprimer le projet « ${project.name} » et tout son contenu ?`)) api('DELETE', `/api/ops/projects/${project.id}`); }} className="p-1 text-slate-400 hover:text-red-600 rounded"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 )}
               </div>
+
+              {project.archived && (
+                <div className="px-4 py-2 bg-slate-100 border-b border-slate-200 text-xs text-slate-600">
+                  <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border mr-2',
+                    project.archiveStatut === 'ANNULE' ? 'bg-red-100 text-red-700 border-red-200' : 'bg-green-100 text-green-700 border-green-200')}>
+                    {project.archiveStatut === 'ANNULE' ? 'Projet annulé' : 'Projet terminé'}
+                  </span>
+                  {project.archiveMotif}
+                  <span className="text-slate-400"> — archivé{project.archivePar ? ` par ${project.archivePar}` : ''}{project.archiveAt ? ` le ${new Date(project.archiveAt).toLocaleDateString('fr-FR')}` : ''}</span>
+                </div>
+              )}
 
               <table className="w-full text-sm">
                 <thead>
@@ -636,7 +660,20 @@ Abdel`;
           );
         })}
         {board.projects.length === 0 && <div className="text-center text-slate-400 py-10">Aucun projet.</div>}
+        {(() => {
+          const nArchives = board.projects.filter((p: any) => p.archived).length;
+          if (!nArchives) return null;
+          return (
+            <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer pt-1">
+              <input type="checkbox" checked={afficherArchives} onChange={e => setAfficherArchives(e.target.checked)} className="h-4 w-4" />
+              Afficher les projets archivés <span className="text-xs text-slate-400">({nArchives})</span>
+            </label>
+          );
+        })()}
       </div>
+
+      {archiveProjet && <ArchiveProjetModal projet={archiveProjet} token={token} onClose={() => setArchiveProjet(null)} onFini={load} />}
+      {importProjet && <ImportPlanningModal projet={importProjet} token={token} onClose={() => setImportProjet(null)} onFini={load} />}
 
       {historyItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setHistoryItem(null)}>
@@ -885,5 +922,181 @@ function Row(p: RowProps) {
         {p.canEdit && <button onClick={p.onDelete} className="p-1 text-slate-300 hover:text-red-600 rounded"><Trash2 className="w-3.5 h-3.5" /></button>}
       </td>
     </tr>
+  );
+}
+
+// ---- Archiver un projet : terminé ou annulé, justificatif obligatoire ----
+function ArchiveProjetModal({ projet, token, onClose, onFini }: { projet: any; token: string | null; onClose: () => void; onFini: () => void }) {
+  const [statut, setStatut] = useState<'TERMINE' | 'ANNULE'>('TERMINE');
+  const [motif, setMotif] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const valider = async () => {
+    if (motif.trim().length < 3) return setErr('Le justificatif est obligatoire.');
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch(`${API_URL}/api/ops/projects/${projet.id}/archiver`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ statut, motif: motif.trim() }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return setErr(j.error || 'Archivage impossible.');
+      onFini(); onClose();
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h4 className="font-semibold text-slate-800">Archiver « {projet.name} »</h4>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div>
+            <span className="text-xs font-medium text-slate-500 block mb-2">Pourquoi ce projet quitte-t-il le suivi actif ?</span>
+            <div className="flex gap-2">
+              {([['TERMINE', 'Projet terminé'], ['ANNULE', 'Projet annulé']] as const).map(([v, l]) => (
+                <button key={v} onClick={() => setStatut(v)}
+                  className={cn('flex-1 px-3 py-2 text-sm font-medium rounded-lg border',
+                    statut === v ? (v === 'ANNULE' ? 'bg-red-50 text-red-700 border-red-300' : 'bg-green-50 text-green-700 border-green-300')
+                      : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50')}>{l}</button>
+              ))}
+            </div>
+          </div>
+          <label className="block">
+            <span className="text-xs font-medium text-slate-500">Justificatif <span className="text-red-500">*</span></span>
+            <textarea value={motif} onChange={e => setMotif(e.target.value)} rows={3} autoFocus
+              placeholder={statut === 'ANNULE' ? "ex. Abandonné : le fournisseur ne peut pas tenir les délais." : "ex. Tous les jalons sont livrés et validés le 12/08."}
+              className="mt-1 w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500" />
+            <span className="text-[11px] text-slate-400">Il restera visible sur le projet archivé — c'est la mémoire de la décision.</span>
+          </label>
+          {err && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{err}</p>}
+          <p className="text-xs text-slate-500">Le projet sortira du suivi actif et du débrief hebdomadaire. Rien n'est supprimé : tu pourras le réactiver.</p>
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100">
+          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg">Annuler</button>
+          <button onClick={valider} disabled={busy || motif.trim().length < 3}
+            className="px-4 py-2 text-sm font-medium text-white bg-slate-800 rounded-lg hover:bg-slate-900 disabled:opacity-40">
+            {busy ? 'Archivage…' : 'Archiver le projet'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Importer un planning Excel ou Word : lecture, aperçu, puis création des jalons ----
+function ImportPlanningModal({ projet, token, onClose, onFini }: { projet: any; token: string | null; onClose: () => void; onFini: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [apercu, setApercu] = useState<any | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const lire = async (f: File) => {
+    setBusy(true); setErr(''); setApercu(null);
+    try {
+      const r = await fetch(`${API_URL}/api/ops/projects/${projet.id}/import-planning?filename=${encodeURIComponent(f.name)}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: f,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) setErr(j.error || 'Lecture impossible.'); else setApercu(j);
+    } catch { setErr('Lecture impossible.'); } finally { setBusy(false); }
+  };
+  const setJalon = (i: number, patch: any) =>
+    setApercu((a: any) => ({ ...a, jalons: a.jalons.map((j: any, k: number) => k === i ? { ...j, ...patch } : j) }));
+  const retirer = (i: number) => setApercu((a: any) => ({ ...a, jalons: a.jalons.filter((_: any, k: number) => k !== i) }));
+
+  const confirmer = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/ops/projects/${projet.id}/import-planning/confirmer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jalons: apercu.jalons }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return setErr(j.error || 'Import impossible.');
+      alert(`${j.crees} jalon(s) ajouté(s) au projet « ${projet.name} ».`);
+      onFini(); onClose();
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h4 className="font-semibold text-slate-800">Importer un planning · {projet.name}</h4>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          {!apercu && (
+            <>
+              <p className="text-sm text-slate-600">
+                Choisis ton fichier de planning : <b>Excel (.xlsx)</b> ou <b>Word (.docx)</b>.
+                Le fichier doit contenir un tableau avec au moins une colonne d'intitulés (jalon, étape, tâche…)
+                et une colonne de dates (échéance, date de fin…). Une colonne « responsable » est reprise si elle existe.
+              </p>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.docx" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) lire(f); e.target.value = ''; }} />
+              <button onClick={() => fileRef.current?.click()} disabled={busy}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                {busy ? 'Lecture…' : 'Choisir un fichier'}
+              </button>
+              <p className="text-xs text-slate-400">Rien n'est enregistré à cette étape : tu verras d'abord ce qui a été lu.</p>
+            </>
+          )}
+          {err && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{err}</p>}
+
+          {apercu && (
+            <>
+              <div className="text-sm text-slate-600">
+                <b>{apercu.jalons.length} jalon(s)</b> lus{apercu.ignorees ? ` · ${apercu.ignorees} ligne(s) ignorée(s)` : ''}
+                {apercu.sansDate ? <span className="text-amber-600"> · {apercu.sansDate} sans date</span> : ''}
+                {apercu.entetes?.length ? <div className="text-xs text-slate-400 mt-0.5">Colonnes reconnues : {apercu.entetes.filter(Boolean).join(' · ')}</div> : null}
+              </div>
+              <div className="border border-slate-200 rounded-lg overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="bg-slate-50 text-left text-[11px] uppercase text-slate-500">
+                    <th className="px-3 py-2 w-10">#</th><th className="px-3 py-2">Jalon</th>
+                    <th className="px-3 py-2 w-36">Échéance</th><th className="px-3 py-2 w-40">Responsable</th><th className="px-3 py-2 w-8"></th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {apercu.jalons.map((j: any, i: number) => (
+                      <tr key={i} className="hover:bg-slate-50">
+                        <td className="px-3 py-1.5 text-slate-400">{i + 1}</td>
+                        <td className="px-3 py-1.5">
+                          <input value={j.titre} onChange={e => setJalon(i, { titre: e.target.value })}
+                            className="w-full text-sm border border-transparent hover:border-slate-300 focus:border-blue-500 rounded px-1 py-0.5 outline-none" />
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <input type="date" value={j.echeance || ''} onChange={e => setJalon(i, { echeance: e.target.value })}
+                            className={cn('w-full text-sm border rounded px-1 py-0.5 outline-none', j.echeance ? 'border-transparent hover:border-slate-300' : 'border-amber-300 bg-amber-50')} />
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <input value={j.responsable || ''} onChange={e => setJalon(i, { responsable: e.target.value })}
+                            className="w-full text-sm border border-transparent hover:border-slate-300 focus:border-blue-500 rounded px-1 py-0.5 outline-none" />
+                        </td>
+                        <td className="px-3 py-1.5 text-right">
+                          <button onClick={() => retirer(i)} title="Ne pas importer cette ligne" className="text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-slate-500">Corrige ce qui doit l'être avant de valider. Les jalons s'ajouteront à la suite de ceux déjà présents.</p>
+            </>
+          )}
+        </div>
+        {apercu && (
+          <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100">
+            <button onClick={() => setApercu(null)} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg">Choisir un autre fichier</button>
+            <button onClick={confirmer} disabled={busy || !apercu.jalons.length}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
+              {busy ? 'Import…' : `Importer ${apercu.jalons.length} jalon(s)`}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

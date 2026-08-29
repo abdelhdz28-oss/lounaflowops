@@ -19,7 +19,8 @@ const HEALTH_CARD: Record<string, { border: string; bg: string; bar: string }> =
 export function KanbanView({ onOpenBatch }: KanbanViewProps) {
   const { batches, productCatalog, updateBatch } = useAppContext();
   const { canEdit } = useAuth();
-  const list = Array.isArray(batches) ? batches : [];
+  // Un lot clôturé est terminé : il n'a plus sa place sur le tableau d'avancement.
+  const list = (Array.isArray(batches) ? batches : []).filter(b => !b.cloture);
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<string | null>(null);

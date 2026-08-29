@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../AuthContext';
 import { cn } from '../utils/cn';
-import { Plus, Trash2, Loader2, Save, FileDown, PackagePlus, X, FilePlus, FolderOpen, Mail } from 'lucide-react';
+import { Plus, Trash2, Loader2, Save, FileDown, PackagePlus, X, FilePlus, FolderOpen, Mail, Upload } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -16,9 +16,15 @@ const SENDER = {
   iban: 'FR76 1009 6180 2800 0745 1120 167',
   bic: 'CMCIFRPP',
 };
+// Signataire des EMAILS uniquement (les PDF Packing List / Facture gardent le bloc émetteur officiel ci-dessus).
+const EMAIL_SIGNER = 'Maya Assistant — AI Agent working with Abdel HADJAB';
+// Email « Goods Ready for Collection » : interlocuteur et destinataires habituels (Dermacity).
+// Modifiables directement dans Outlook avant l'envoi.
+const EMAIL_GREETING = 'Hi Mohammed Ali,';
+const EMAIL_TO = ['m.ali@dermacity.net', 'a.badran@dermacity.net', 'a.badran@masteryavenue.com'];
 
 interface PlProduct { ref: string; designation: string; type: string; hsCode: string | null; unitPrice: number | null; boxWeightKg: number | null; capacityPerCarton: number | null; }
-interface PlClient { id: number; name: string; address: string; customerId: string; }
+interface PlClient { id: number; name: string; address: string; customerId: string; email: string; }
 interface PlSite { id: number; name: string; address: string; }
 interface PlDoc { id: number; invoiceNo: string; docDate: string | null; rev: number; clientName: string; clientAddress: string; pickupName: string; pickupAddress: string; lines: Line[]; notes: string; updatedAt?: string; }
 // Shape d'une ligne (JSONB `lines`). cartons/dimension/grossWeight vides = calcul auto (surchargeables).
@@ -101,6 +107,10 @@ export function PackingListView() {
   const [batches, setBatches] = useState<any[]>([]);
   const [batchesLoading, setBatchesLoading] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // Import d'un document PDF (lecture IA) : résultat proposé avant ajout des lignes
+  const [importBusy, setImportBusy] = useState(false);
+  const [importErr, setImportErr] = useState('');
+  const [importResult, setImportResult] = useState<any>(null);
 
   const headers = useMemo(() => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }), [token]);
   const productByRef = useMemo(() => new Map(products.map(p => [p.ref, p])), [products]);
@@ -171,12 +181,15 @@ export function PackingListView() {
   };
 
   // --- Sélection des lots ---
+  const chargerLots = async () => {
+    const r = await fetch(`${API_URL}/api/batches`, { headers });
+    if (r.ok) { const d = await r.json(); setBatches(Array.isArray(d) ? d : []); }
+  };
+  // Chargés dès l'ouverture de l'écran : la liste alimente aussi le choix du lot sur chaque ligne.
+  useEffect(() => { if (token) chargerLots().catch(() => {}); }, [token]);
   const openBatchModal = async () => {
     setBatchModal(true); setChecked(new Set()); setBatchesLoading(true);
-    try {
-      const r = await fetch(`${API_URL}/api/batches`, { headers });
-      if (r.ok) { const d = await r.json(); setBatches(Array.isArray(d) ? d : []); }
-    } finally { setBatchesLoading(false); }
+    try { await chargerLots(); } finally { setBatchesLoading(false); }
   };
 
   const addBatchLines = () => {
@@ -205,6 +218,54 @@ export function PackingListView() {
 
   const addManualLine = () => setLines(prev => [...prev, emptyLine(prev.length + 1)]);
 
+  // --- Import d'un document PDF : l'IA propose les lignes, Abdel valide avant ajout ---
+  const importFile = (f: File | null | undefined) => {
+    if (!f) return;
+    setImportErr(''); setImportBusy(true); setImportResult(null);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const b64 = String(reader.result || '').split(',')[1] || '';
+        const r = await fetch(`${API_URL}/api/pl/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ file: b64, name: f.name }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || `Erreur ${r.status}`);
+        if (!d.lines?.length) throw new Error("Aucune ligne d'article n'a été trouvée dans ce document.");
+        setImportResult(d);
+      } catch (e: any) { setImportErr(e.message); }
+      finally { setImportBusy(false); }
+    };
+    reader.onerror = () => { setImportErr('Fichier illisible.'); setImportBusy(false); };
+    reader.readAsDataURL(f);
+  };
+
+  // Ajoute les lignes extraites au document (poids et capacité repris du catalogue produits).
+  const confirmImport = () => {
+    const extracted = importResult?.lines || [];
+    setLines(prev => {
+      const added: Line[] = extracted.map((x: any) => {
+        const p = productByRef.get(x.ref) || products.find(pp => pp.designation.toLowerCase() === String(x.product || '').toLowerCase());
+        return {
+          ref: x.ref || p?.ref || '', product: x.product || p?.designation || '', qty: x.qty || '',
+          lot: x.lot || '', expiry: x.expiry || '',
+          unitPrice: x.unitPrice || p?.unitPrice || '',
+          boxWeight: p?.boxWeightKg ?? '', capacity: p?.capacityPerCarton ?? '',
+          cartons: '', dimension: '', grossWeight: '', palette: 0,
+        };
+      });
+      return [...prev, ...added].map((l, i) => ({ ...l, palette: l.palette || i + 1 }));
+    });
+    if (importResult?.clientName && !clientName) {
+      const c = clients.find(x => x.name.toLowerCase() === String(importResult.clientName).toLowerCase());
+      if (c) { setClientName(c.name); setClientAddress(c.address || ''); }
+    }
+    if (importResult?.invoiceNo && !invoiceNo) setInvoiceNo(importResult.invoiceNo);
+    setImportResult(null);
+  };
+
   const setLine = (idx: number, patch: Partial<Line>) => setLines(prev => prev.map((l, i) => {
     if (i !== idx) return l;
     const n = { ...l, ...patch };
@@ -226,7 +287,7 @@ export function PackingListView() {
   const buildPackingListHtml = () => {
     const rows = lines.map(l => {
       const e = effectiveLine(l);
-      return `<tr><td>${esc(l.ref)}</td><td>${esc(l.product)}${l.lot ? ' – Lot ' + esc(l.lot) : ''}</td><td class=c>${l.boxWeight !== '' ? esc(l.boxWeight) : ''}</td><td class=c>${l.capacity !== '' ? esc(l.capacity) : ''}</td><td class=c>${e.qty}</td><td class=c>${esc(l.lot)}</td><td class=c>${esc(l.expiry)}</td><td class=c>${e.cartons}</td><td class=c>${esc(e.dimension)}</td><td class=c>${e.grossWeight}</td><td class=c>${esc(l.palette)}</td></tr>`;
+      return `<tr><td>${esc(l.ref)}</td><td>${esc(l.product)}${l.lot ? ' – Lot ' + esc(l.lot) : ''}</td><td class=c>${l.capacity !== '' ? esc(l.capacity) : ''}</td><td class=c>${e.qty}</td><td class=c>${esc(l.lot)}</td><td class=c>${esc(l.expiry)}</td><td class=c>${e.cartons}</td><td class=c>${esc(e.dimension)}</td><td class=c>${e.grossWeight}</td><td class=c>${esc(l.palette)}</td></tr>`;
     }).join('');
     const plLots = [...new Set(lines.map(l => String(l.lot || '').trim()).filter(Boolean))].join(', ');
     const html = `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Packing List ${esc(invoiceNo)}${plLots ? ' - Lot ' + esc(plLots) : ''}</title>${pdfStyle}</head><body>
@@ -239,9 +300,9 @@ export function PackingListView() {
 <div class=box style="width:48%"><b>To :</b><br><b>${esc(clientName)}</b><br>${nl2br(clientAddress)}</div>
 <div class=box style="width:48%;background:#f8fafc"><b>Pickup / Lieu d'enlèvement :</b><br><b>${esc(pickupName)}</b><br>${nl2br(pickupAddress)}</div>
 <div class=box style="display:inline-block"><b>Gross Weight :</b> ${totals.gross} kg &nbsp;·&nbsp; <b>Total Packages :</b> ${totals.cartons} cartons &nbsp;·&nbsp; <b>Total boxes :</b> ${totals.boxes}</div>
-<table><thead><tr><th>REFERENCE</th><th>PRODUCT</th><th>BOX WEIGHT (KG)</th><th>CAPACITY PER CARTON</th><th>Quantity</th><th>BATCH</th><th>EXPIRY DATE</th><th>BOXES</th><th>DIMENSION LxlxH</th><th>Gross WEIGHT (kg)</th><th>PALETT</th></tr></thead>
+<table><thead><tr><th>REFERENCE</th><th>PRODUCT</th><th>CAPACITY PER CARTON</th><th>Quantity</th><th>BATCH</th><th>EXPIRY DATE</th><th>BOXES</th><th>DIMENSION LxlxH</th><th>Gross WEIGHT (kg)</th><th>PALETT</th></tr></thead>
 <tbody>${rows}
-<tr class=tot><td colspan=4>TOTAL</td><td class=c>${totals.boxes}</td><td></td><td></td><td class=c>${totals.cartons}</td><td></td><td class=c>${totals.gross}</td><td class=c>${totals.palettes}</td></tr>
+<tr class=tot><td colspan=3>TOTAL</td><td class=c>${totals.boxes}</td><td></td><td></td><td class=c>${totals.cartons}</td><td></td><td class=c>${totals.gross}</td><td class=c>${totals.palettes}</td></tr>
 </tbody></table>
 <p style="font-weight:bold">${esc(totals.say)}</p>
 <div style="margin-top:50px"><b>Signature and Company Stamp</b><div style="border:1px solid #64748b;width:260px;height:90px;margin-top:6px"></div></div>
@@ -253,10 +314,28 @@ export function PackingListView() {
   const buildInvoiceHtml = () => {
     const client = clients.find(c => c.name === clientName);
     const hsCodes = [...new Set(lines.map(l => productByRef.get(l.ref)?.hsCode).filter(Boolean))];
-    const rows = lines.map(l => {
+    // La facture affiche UNE ligne par numéro de lot : les quantités de la Packing List
+    // (une ligne par palette) sont additionnées. Les lignes sans n° de lot restent séparées.
+    const groupes: { ref: string; lot: string; expiry: string; product: string; unitPrice: number; qty: number; totalHT: number }[] = [];
+    const parLot = new Map<string, number>();   // n° de lot → index dans `groupes`
+    lines.forEach((l, i) => {
       const e = effectiveLine(l);
-      return `<tr><td>${esc(l.ref)}</td><td class=c>${esc(l.lot)}</td><td class=c>${esc(l.expiry)}</td><td class=c>${e.qty}</td><td>${esc(l.product)}${l.lot ? ' – Lot ' + esc(l.lot) : ''}</td><td class=r>${eur(num(l.unitPrice))}</td><td class=r>${eur(e.totalHT)}</td></tr>`;
-    }).join('');
+      const lot = String(l.lot || '').trim();
+      const cle = lot || `__sans_lot_${i}`;
+      const idx = parLot.get(cle);
+      if (idx === undefined) {
+        parLot.set(cle, groupes.length);
+        groupes.push({ ref: l.ref, lot, expiry: l.expiry, product: l.product, unitPrice: num(l.unitPrice), qty: e.qty, totalHT: e.totalHT });
+      } else {
+        const g = groupes[idx];
+        g.qty += e.qty;
+        g.totalHT += e.totalHT;
+        if (!g.expiry && l.expiry) g.expiry = l.expiry;      // complète si la 1re palette n'avait pas la date
+      }
+    });
+    const rows = groupes.map(g =>
+      `<tr><td>${esc(g.ref)}</td><td class=c>${esc(g.lot)}</td><td class=c>${esc(g.expiry)}</td><td class=c>${g.qty}</td><td>${esc(g.product)}${g.lot ? ' – Lot ' + esc(g.lot) : ''}</td><td class=r>${eur(g.unitPrice)}</td><td class=r>${eur(g.totalHT)}</td></tr>`
+    ).join('');
     const invLots = [...new Set(lines.map(l => String(l.lot || '').trim()).filter(Boolean))].join(', ');
     const html = `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Facture ${esc(invoiceNo)}${invLots ? ' - Lot ' + esc(invLots) : ''}</title>${pdfStyle}</head><body>
 <button class=np onclick="print()" style="float:right;padding:6px 12px;cursor:pointer">Imprimer / PDF</button>
@@ -285,6 +364,20 @@ BIC/SWIFT : ${esc(SENDER.bic)}
   };
   const exportInvoicePDF = () => openPdf(buildInvoiceHtml());
 
+  // Les deux documents dans un seul fichier : Packing List, saut de page, puis Facture.
+  const stripPrintButton = (html: string) => html.replace(/<button class=np[\s\S]*?<\/button>/gi, '');
+  const bodyOf = (html: string) => stripPrintButton(html.slice(html.indexOf('<body>') + 6, html.lastIndexOf('</body>')));
+  const buildBothHtml = () => {
+    const lots = [...new Set(lines.map(l => String(l.lot || '').trim()).filter(Boolean))].join(', ');
+    return `<!doctype html><html lang=fr><head><meta charset=utf-8><title>Packing List + Facture ${esc(invoiceNo)}${lots ? ' - Lot ' + esc(lots) : ''}</title>${pdfStyle}</head><body>
+<button class=np onclick="print()" style="float:right;padding:6px 12px;cursor:pointer">Imprimer / PDF</button>
+${bodyOf(buildPackingListHtml())}
+<div style="page-break-before:always"></div>
+${bodyOf(buildInvoiceHtml())}
+</body></html>`;
+  };
+  const exportBothPDF = () => openPdf(buildBothHtml());
+
   // Ouvre un brouillon Outlook (depuis la boîte connectée) « Goods Ready for Collection », pré-rempli depuis le Packing List.
   const emailReady = async () => {
     const products = [...new Set(lines.map(l => String(l.product || '').trim()).filter(Boolean))].join(', ');
@@ -295,7 +388,7 @@ BIC/SWIFT : ${esc(SENDER.bic)}
     const qty = `${totals.boxes} boxes (${totals.cartons} cartons, ${pad2(totals.palettes)} pallets)`;
     const subject = `Goods Ready for Collection – ${products || '[Product]'} – Batch ${lots || '[Lot]'} – Order Ref ${orderRef}`;
     const body =
-`Dear ${clientName || '[Client Name / Contact Name]'},
+`${EMAIL_GREETING}
 
 We are pleased to inform you that your order is now ready for collection.
 Please find attached the following documents for your reference:
@@ -316,20 +409,20 @@ Please arrange for collection at your earliest convenience, and let us know the 
 We remain available for any questions regarding this shipment.
 
 Best regards,
-${SENDER.contact}
+${EMAIL_SIGNER}
 ${SENDER.company}
 Tel: ${SENDER.tel} — ${SENDER.mail}
 ${SENDER.site}`;
     // Repli : lien de composition simple (sans police ni pièces jointes) si le brouillon Graph échoue.
     const deeplink = () => {
-      const url = `https://outlook.office.com/mail/deeplink/compose?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      const url = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(EMAIL_TO.join(';'))}&cc=a.jebari@louna-aesthetics.com&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
       const w = window.open('', '_blank'); if (w) w.location.href = url; else window.open(url, '_blank');
     };
     // Brouillon Outlook réel via Graph : corps HTML aéré en Aptos 12 + Packing List et Facture en PDF joints.
     const li = 'margin:3px 0';
     const bodyHtml =
 `<div style="font-family:Aptos,'Segoe UI',Calibri,sans-serif;font-size:12pt;color:#1e293b;line-height:1.5">
-  <p>Dear ${esc(clientName || '[Client Name / Contact Name]')},</p>
+  <p>${esc(EMAIL_GREETING)}</p>
   <p>We are pleased to inform you that your order is now ready for collection.</p>
   <p>Please find attached the following documents for your reference:</p>
   <ul style="margin:6px 0 16px 22px;padding:0">
@@ -349,7 +442,7 @@ ${SENDER.site}`;
   <p>We remain available for any questions regarding this shipment.</p>
   <p style="margin-top:18px;margin-bottom:0">Best regards,</p>
   <p style="margin-top:2px">
-    <b>${esc(SENDER.contact)}</b><br>
+    <b>${esc(EMAIL_SIGNER)}</b><br>
     ${esc(SENDER.company)}<br>
     Tel: ${esc(SENDER.tel)} — ${esc(SENDER.mail)}<br>
     ${esc(SENDER.site)}
@@ -361,7 +454,7 @@ ${SENDER.site}`;
       const tag = `${invoiceNo || ''}${lots ? ' - Lot ' + lots : ''}`.trim();
       const r = await fetch(`${API_URL}/api/pl/email-draft`, {
         method: 'POST', headers,
-        body: JSON.stringify({ subject, bodyHtml, attachments: [
+        body: JSON.stringify({ subject, bodyHtml, clientName, attachments: [
           { name: `Packing List ${tag}.pdf`.replace(/\s+/g, ' ').trim(), contentBytes: plPdf },
           { name: `Facture ${tag}.pdf`.replace(/\s+/g, ' ').trim(), contentBytes: invPdf },
         ] }),
@@ -372,7 +465,7 @@ ${SENDER.site}`;
     } catch { deeplink(); } finally { setEmailBusy(false); }
   };
 
-  if (loading) return <div className="p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
+  if (loading) return <div className="p-4 sm:p-6 lg:p-8 flex-1 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> Chargement…</div>;
 
   const inputCls = 'w-full text-sm border border-slate-300 rounded-md px-2 py-1.5 outline-none focus:border-blue-500 disabled:bg-slate-50';
   const cellCls = 'w-full text-xs border border-transparent hover:border-slate-300 focus:border-blue-500 rounded px-1.5 py-1 outline-none bg-transparent';
@@ -404,6 +497,7 @@ ${SENDER.site}`;
               <div className="flex-1" />
               <button onClick={exportPackingListPDF} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><FileDown className="w-4 h-4" /> 📦 Packing List PDF</button>
               <button onClick={exportInvoicePDF} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><FileDown className="w-4 h-4" /> 🧾 Facture PDF</button>
+              <button onClick={exportBothPDF} title="Un seul document : Packing List puis Facture" className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><FileDown className="w-4 h-4" /> 🖨️ PL + Facture</button>
               <button onClick={emailReady} disabled={emailBusy} title="Crée un brouillon Outlook « Goods Ready for Collection » (Aptos 12) avec Packing List + Facture joints" className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-60">{emailBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} {emailBusy ? 'Préparation…' : '✉️ Email mise à dispo'}</button>
             </div>
             <div>
@@ -442,17 +536,29 @@ ${SENDER.site}`;
             <div className="flex items-center gap-2 mb-3">
               <h3 className="text-sm font-semibold text-slate-700 flex-1">Lignes du document</h3>
               <button onClick={openBatchModal} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"><PackagePlus className="w-4 h-4" /> + Ajouter des lots</button>
+              <label className={cn('flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border cursor-pointer', importBusy ? 'text-slate-400 bg-slate-50 border-slate-200' : 'text-slate-700 bg-white border-slate-300 hover:bg-slate-50')}
+                title="Déposer un bon de commande PDF : l'IA en extrait les lignes, vous validez avant ajout">
+                {importBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                {importBusy ? 'Lecture du document…' : '📄 Importer un PDF'}
+                <input type="file" accept="application/pdf" className="hidden" disabled={importBusy}
+                  onChange={ev => { importFile(ev.target.files?.[0]); ev.target.value = ''; }} />
+              </label>
               <button onClick={addManualLine} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"><Plus className="w-4 h-4" /> + Ligne manuelle</button>
             </div>
+            {importErr && (
+              <p className="mb-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{importErr}</p>
+            )}
+            {/* Lots existants proposés sur chaque ligne : c'est ce qui relie la facture au lot de production. */}
+            <datalist id="pl-lots">{batches.map((b: any) => <option key={b.id} value={b.id} />)}</datalist>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-left text-slate-500 border-b border-slate-200">
-                    {['Réf', 'Produit', 'Qté (boîtes)', 'N° Lot', 'Péremption', 'Prix U. (€)', 'Cartons', 'Poids/boîte', 'Dim. palette', 'Poids brut', 'N° palette', ''].map((h, i) => <th key={i} className="px-1.5 py-2 font-medium whitespace-nowrap">{h}</th>)}
+                    {['Réf', 'Produit', 'Qté (boîtes)', 'N° Lot', 'Péremption', 'Prix U. (€)', 'Cartons', 'Dim. palette', 'Poids brut', 'N° palette', ''].map((h, i) => <th key={i} className="px-1.5 py-2 font-medium whitespace-nowrap">{h}</th>)}
                   </tr>
                 </thead>
                 <tbody>
-                  {lines.length === 0 && <tr><td colSpan={12} className="text-center text-slate-400 py-6">Aucune ligne — ajoutez des lots ou une ligne manuelle.</td></tr>}
+                  {lines.length === 0 && <tr><td colSpan={11} className="text-center text-slate-400 py-6">Aucune ligne — ajoutez des lots, importez un document ou créez une ligne manuelle.</td></tr>}
                   {lines.map((l, i) => {
                     const e = effectiveLine(l);
                     return (
@@ -460,11 +566,10 @@ ${SENDER.site}`;
                         <td className="w-28"><input className={cellCls} list="pl-refs" value={l.ref} onChange={ev => setLine(i, { ref: ev.target.value })} /></td>
                         <td className="min-w-[160px]"><input className={cellCls} value={l.product} onChange={ev => setLine(i, { product: ev.target.value })} /></td>
                         <td className="w-20"><input type="number" className={cellCls} value={l.qty} onChange={ev => setLine(i, { qty: ev.target.value })} /></td>
-                        <td className="w-24"><input className={cellCls} value={l.lot} onChange={ev => setLine(i, { lot: ev.target.value })} /></td>
+                        <td className="w-24"><input list="pl-lots" className={cellCls} value={l.lot} onChange={ev => setLine(i, { lot: ev.target.value })} title="Choisir un lot existant : c'est ce qui relie la facture au lot de production" /></td>
                         <td className="w-28"><input className={cellCls} value={l.expiry} onChange={ev => setLine(i, { expiry: ev.target.value })} placeholder="MM/AAAA" /></td>
                         <td className="w-20"><input type="number" className={cellCls} value={l.unitPrice} onChange={ev => setLine(i, { unitPrice: ev.target.value })} /></td>
                         <td className="w-20"><input type="number" className={cn(cellCls, l.cartons === '' && 'text-blue-700 font-medium')} value={l.cartons === '' ? e.cartons : l.cartons} onChange={ev => setLine(i, { cartons: ev.target.value })} title="Calculé automatiquement — tapez une valeur pour surcharger" /></td>
-                        <td className="w-20"><input type="number" step="0.001" className={cellCls} value={l.boxWeight} onChange={ev => setLine(i, { boxWeight: ev.target.value })} /></td>
                         <td className="w-28"><input className={cn(cellCls, !l.dimension && 'text-blue-700 font-medium')} value={l.dimension || e.dimension} onChange={ev => setLine(i, { dimension: ev.target.value === e.autoDimension ? '' : ev.target.value })} title="Calculé automatiquement — tapez une valeur pour surcharger" /></td>
                         <td className="w-20"><input type="number" className={cn(cellCls, l.grossWeight === '' && 'text-blue-700 font-medium')} value={l.grossWeight === '' ? e.grossWeight : l.grossWeight} onChange={ev => setLine(i, { grossWeight: ev.target.value })} title="Calculé automatiquement — tapez une valeur pour surcharger" /></td>
                         <td className="w-16"><input className={cellCls} value={l.palette} onChange={ev => setLine(i, { palette: ev.target.value })} /></td>
@@ -491,6 +596,57 @@ ${SENDER.site}`;
       )}
 
       {tab === 'catalog' && <CatalogTab products={products} sites={sites} clients={clients} canEdit={canEdit} headers={headers} onReload={load} />}
+
+      {/* Vérification des lignes lues par l'IA dans le document importé */}
+      {importResult && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-6" onClick={() => setImportResult(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+              <div>
+                <h3 className="font-semibold text-slate-800">Lignes lues dans le document</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Vérifiez avant d'ajouter — l'IA peut se tromper.
+                  {importResult.clientName ? ` Client détecté : ${importResult.clientName}.` : ''}
+                  {importResult.invoiceNo ? ` N° : ${importResult.invoiceNo}.` : ''}
+                </p>
+              </div>
+              <button onClick={() => setImportResult(null)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-slate-500 border-b border-slate-200">
+                    {['Réf', 'Produit', 'Qté (boîtes)', 'N° Lot', 'Péremption', 'Prix U. (€)', 'Remarque'].map((h, i) => <th key={i} className="px-1.5 py-2 font-medium whitespace-nowrap">{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {importResult.lines.map((x: any, i: number) => (
+                    <tr key={i} className="border-b border-slate-100">
+                      <td className="px-1.5 py-1.5">{x.ref || <span className="text-slate-300">—</span>}</td>
+                      <td className="px-1.5 py-1.5">{x.product}</td>
+                      <td className="px-1.5 py-1.5">{x.qty || <span className="text-amber-600">à compléter</span>}</td>
+                      <td className="px-1.5 py-1.5">{x.lot || <span className="text-slate-300">—</span>}</td>
+                      <td className="px-1.5 py-1.5">{x.expiry || <span className="text-slate-300">—</span>}</td>
+                      <td className="px-1.5 py-1.5">{x.unitPrice || <span className="text-slate-300">—</span>}</td>
+                      <td className="px-1.5 py-1.5 text-amber-700">{x.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-slate-400 mt-3">
+                Les lignes seront ajoutées à la suite des lignes existantes. Poids par boîte, capacité par carton, cartons,
+                dimensions et poids brut seront complétés automatiquement depuis le catalogue produits.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 p-4 border-t border-slate-200">
+              <button onClick={() => setImportResult(null)} className="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-900">Annuler</button>
+              <button onClick={confirmImport} className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">
+                Ajouter {importResult.lines.length} ligne(s)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modale de sélection des lots */}
       {batchModal && (
@@ -641,6 +797,8 @@ function CatalogTab({ products, sites, clients, canEdit, headers, onReload }: {
                 <div className="text-sm font-medium text-slate-700 flex-1">{c.name}</div>
                 <span className="text-xs text-slate-400">{c.customerId}</span>
                 {canEdit && <button onClick={() => { const v = prompt('Customer ID :', c.customerId || ''); if (v !== null) patchClient(c.id, { customerId: v }); }} className="text-xs font-medium text-blue-600 hover:text-blue-800">ID</button>}
+                <span className={cn('text-xs', c.email ? 'text-slate-400' : 'text-amber-600')}>{c.email || 'sans e-mail'}</span>
+                {canEdit && <button onClick={() => { const v = prompt("E-mail du client (plusieurs adresses séparées par des virgules) :", c.email || ''); if (v !== null) patchClient(c.id, { email: v.trim() }); }} className="text-xs font-medium text-blue-600 hover:text-blue-800">E-mail</button>}
                 {canEdit && <button onClick={() => deleteClient(c)} className="text-slate-300 hover:text-red-500"><Trash2 className="w-3.5 h-3.5" /></button>}
               </div>
               <textarea disabled={!canEdit} className="w-full text-xs border border-slate-300 rounded-md px-2 py-1.5 h-20 resize-none outline-none focus:border-blue-500 disabled:bg-slate-50" defaultValue={c.address || ''} onBlur={e => { if (canEdit && e.target.value !== c.address) patchClient(c.id, { address: e.target.value }); }} />

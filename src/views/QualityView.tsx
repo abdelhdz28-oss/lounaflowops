@@ -65,7 +65,7 @@ export function QualityView({ onOpenBatch }: QualityViewProps) {
   ).sort((a, b) => b.daysLate - a.daysLate);
 
   return (
-    <div className="p-8 flex-1 overflow-y-auto bg-slate-50">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-y-auto bg-slate-50">
       <div className="flex gap-1 mb-5 border-b border-slate-200">
         {([['rendement', 'Rendement de production'], ['controles', 'Contrôles & lead time']] as const).map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} className={cn('px-4 py-2 text-sm font-medium border-b-2 -mb-px', tab === k ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700')}>{l}</button>

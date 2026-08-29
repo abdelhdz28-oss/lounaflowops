@@ -93,7 +93,7 @@ export function OdooView() {
   );
 
   return (
-    <div className="p-8 flex-1 overflow-auto bg-slate-50 space-y-6">
+    <div className="p-4 sm:p-6 lg:p-8 flex-1 overflow-auto bg-slate-50 space-y-6">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-slate-800">Factures clients</h3>
         <button onClick={loadInv} title="Rafraîchir" className="text-slate-400 hover:text-blue-600"><RefreshCw className={cn('w-4 h-4', invLoading && 'animate-spin')} /></button>

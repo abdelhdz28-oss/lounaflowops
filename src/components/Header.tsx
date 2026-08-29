@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Plus, LogOut, User, Shield, Edit3, Eye, Maximize2, Minimize2, Sparkles } from 'lucide-react';
+import { Download, Plus, LogOut, User, Shield, Edit3, Eye, Maximize2, Minimize2, Sparkles, Menu } from 'lucide-react';
 import { useAppContext } from '../AppContext';
 import { useAuth } from '../AuthContext';
 import { exportCurrentView } from '../utils/export';
@@ -12,6 +12,7 @@ interface HeaderProps {
   presentation: boolean;
   onTogglePresentation: () => void;
   onOpenMaya: () => void;
+  onOpenMenu?: () => void;
 }
 
 const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
@@ -20,7 +21,7 @@ const roleLabels: Record<string, { label: string; icon: React.ReactNode; color: 
   viewer: { label: 'Lecture seule', icon: <Eye className="w-3 h-3" />, color: 'text-slate-600 bg-slate-50 border-slate-200' },
 };
 
-export function Header({ title, currentView, onNewBatch, presentation, onTogglePresentation, onOpenMaya }: HeaderProps) {
+export function Header({ title, currentView, onNewBatch, presentation, onTogglePresentation, onOpenMaya, onOpenMenu }: HeaderProps) {
   const { batches, deliveries, fluxConfig } = useAppContext();
   const { user, logout, canEdit } = useAuth();
 
@@ -31,20 +32,27 @@ export function Header({ title, currentView, onNewBatch, presentation, onToggleP
   const roleInfo = user ? (roleLabels[user.role] || roleLabels.viewer) : null;
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
-      <h1 className="text-lg font-semibold text-slate-800">{title}</h1>
+    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 lg:px-8 shrink-0 gap-2">
+      <div className="flex items-center gap-2 min-w-0">
+        {/* Bouton menu : uniquement sur petit écran (téléphone / tablette) */}
+        <button onClick={onOpenMenu} aria-label="Ouvrir le menu"
+          className="lg:hidden p-2 -ml-1 rounded-md text-slate-600 hover:bg-slate-100">
+          <Menu className="w-5 h-5" />
+        </button>
+        <h1 className="text-base lg:text-lg font-semibold text-slate-800 truncate">{title}</h1>
+      </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 lg:gap-4 shrink-0">
         <button
           onClick={onOpenMaya}
           title="Parler à Maya, ton assistante"
           className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-500 to-blue-600 rounded-md hover:from-indigo-600 hover:to-blue-700 transition-colors shadow-sm"
         >
-          <Sparkles className="w-4 h-4" /> Maya
+          <Sparkles className="w-4 h-4" /> <span className="hidden sm:inline">Maya</span>
         </button>
 
         {user && roleInfo && (
-          <div className="flex items-center gap-3 mr-2">
+          <div className="hidden lg:flex items-center gap-3 mr-2">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm">
               <User className="w-4 h-4 text-slate-500" />
               <span className="font-medium text-slate-700">{user.username}</span>
@@ -61,7 +69,7 @@ export function Header({ title, currentView, onNewBatch, presentation, onToggleP
 
         <button
           onClick={onTogglePresentation}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors"
+          className="hidden lg:flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors"
           title={presentation ? 'Quitter la présentation' : 'Mode présentation (plein écran)'}
         >
           {presentation ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -73,7 +81,7 @@ export function Header({ title, currentView, onNewBatch, presentation, onToggleP
           className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors"
         >
           <Download className="w-4 h-4" />
-          Exporter
+          <span className="hidden sm:inline">Exporter</span>
         </button>
 
         {canEdit && (
@@ -82,7 +90,7 @@ export function Header({ title, currentView, onNewBatch, presentation, onToggleP
             className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors"
           >
             <Plus className="w-4 h-4" />
-            Nouveau Lot
+            <span className="hidden sm:inline">Nouveau Lot</span>
           </button>
         )}
 
